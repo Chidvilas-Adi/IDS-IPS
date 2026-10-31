@@ -44,13 +44,23 @@ export default function Compliance() {
             Dynamic SQL queries continuously assessing PCI-DSS, HIPAA, and SOC2 controls directly in database.
           </p>
         </div>
-        <button
-          onClick={runAllChecks}
-          disabled={running}
-          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-lg font-medium shadow-lg transition"
-        >
-          <Play size={16} /> {running ? 'Evaluating...' : 'Run All Verification Checks'}
-        </button>
+        <div className="flex items-center gap-3">
+          <a
+            href="http://localhost:5000/api/compliance/reports/export"
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 px-4 py-2 rounded-lg font-medium text-sm transition text-slate-200"
+          >
+            Export PDF / Report
+          </a>
+          <button
+            onClick={runAllChecks}
+            disabled={running}
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-lg font-medium shadow-lg transition text-sm"
+          >
+            <Play size={16} /> {running ? 'Evaluating...' : 'Run All Verification Checks'}
+          </button>
+        </div>
       </div>
 
       <div className="bg-slate-900/80 border border-slate-800 rounded-xl overflow-hidden shadow-xl">

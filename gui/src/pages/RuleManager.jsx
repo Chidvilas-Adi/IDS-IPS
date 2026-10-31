@@ -55,9 +55,31 @@ export default function RuleManager() {
             Rules, thresholds, and DPI signatures stored directly in PostgreSQL tables. Changes take effect instantly.
           </p>
         </div>
-        <button className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg font-medium shadow-lg transition">
-          <Plus size={18} /> Add Database Rule
-        </button>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-2 rounded-lg font-medium text-sm transition cursor-pointer text-slate-200">
+            <span>📜 Import Snort / Suricata .rules</span>
+            <input
+              type="file"
+              accept=".rules,.txt"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const text = await file.text();
+                try {
+                  const res = await client.post('/rules/import/snort', { rules_text: text });
+                  toast.success(`Imported ${res.data.imported || 0} signatures into database`);
+                  fetchRules();
+                } catch (err) {
+                  toast.error('Failed to import Snort rules');
+                }
+              }}
+            />
+          </label>
+          <button className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg font-medium text-sm shadow-lg transition">
+            <Plus size={18} /> Add Database Rule
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
