@@ -1,0 +1,15 @@
+flask==3.0.0
+flask-socketio==5.3.6
+flask-jwt-extended==4.6.0
+flask-cors==4.0.0
+strawberry-graphql[flask]==0.219.0
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+pymongo==4.6.1
+redis==5.0.1
+python-dotenv==1.0.0
+eventlet==0.35.1
+marshmallow==3.20.2
+webargs==8.3.0
+celery==5.3.6
+gunicorn==21.2.0

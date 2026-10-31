@@ -1,0 +1,159 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* Global dark theme base */
+html, body {
+  @apply bg-slate-950 text-slate-100;
+  font-family: 'Inter', sans-serif;
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+#root {
+  height: 100%;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-slate-900;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-600 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-slate-500;
+}
+
+/* React Flow overrides */
+.react-flow__background {
+  background-color: #0f172a !important;
+}
+.react-flow__edge-path {
+  stroke: #475569 !important;
+}
+
+/* Leaflet overrides */
+.leaflet-container {
+  background: #0f172a !important;
+}
+.leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.9);
+}
+.leaflet-control-attribution {
+  background: rgba(15, 23, 42, 0.8) !important;
+  color: #64748b !important;
+}
+
+/* Custom animations */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Alert ticker */
+.ticker-wrap {
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ticker-inner {
+  display: inline-block;
+  animation: ticker 40s linear infinite;
+}
+@keyframes ticker {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+/* Hex viewer */
+.hex-viewer {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+/* Glow effects for severity */
+.glow-critical { box-shadow: 0 0 12px rgba(239, 68, 68, 0.35); }
+.glow-high     { box-shadow: 0 0 12px rgba(249, 115, 22, 0.35); }
+.glow-medium   { box-shadow: 0 0 12px rgba(234, 179, 8, 0.35); }
+.glow-low      { box-shadow: 0 0 12px rgba(59, 130, 246, 0.35); }
+.glow-green    { box-shadow: 0 0 12px rgba(34, 197, 94, 0.35); }
+
+/* Table styles */
+.ids-table {
+  @apply w-full text-sm;
+}
+.ids-table thead th {
+  @apply px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider bg-slate-800/50 first:rounded-tl-lg last:rounded-tr-lg;
+}
+.ids-table tbody tr {
+  @apply border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors cursor-pointer;
+}
+.ids-table tbody td {
+  @apply px-4 py-3 text-slate-300;
+}
+
+/* Card base */
+.ids-card {
+  @apply bg-slate-800/50 border border-slate-700/50 rounded-xl backdrop-blur-sm;
+}
+
+/* Stat card */
+.stat-card {
+  @apply ids-card p-5 flex flex-col gap-3;
+}
+
+/* Input base */
+.ids-input {
+  @apply bg-slate-800 border border-slate-600 text-slate-100 placeholder-slate-500 rounded-lg px-3 py-2 text-sm
+         focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all;
+}
+
+/* Button base */
+.ids-btn {
+  @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all duration-150
+         disabled:opacity-50 disabled:cursor-not-allowed;
+}
+.ids-btn-primary {
+  @apply ids-btn bg-brand-600 text-white hover:bg-brand-500 active:bg-brand-700;
+}
+.ids-btn-danger {
+  @apply ids-btn bg-red-600 text-white hover:bg-red-500 active:bg-red-700;
+}
+.ids-btn-ghost {
+  @apply ids-btn bg-transparent text-slate-400 hover:text-slate-100 hover:bg-slate-700;
+}
+.ids-btn-outline {
+  @apply ids-btn border border-slate-600 text-slate-300 hover:border-slate-400 hover:text-slate-100 hover:bg-slate-700/50;
+}
+
+/* Badge base */
+.ids-badge {
+  @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold;
+}
+
+/* Section header */
+.section-header {
+  @apply flex items-center justify-between mb-4;
+}
+.section-title {
+  @apply text-base font-semibold text-slate-100;
+}
+
+/* Modal overlay */
+.modal-overlay {
+  @apply fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4;
+}
+.modal-box {
+  @apply bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto;
+}

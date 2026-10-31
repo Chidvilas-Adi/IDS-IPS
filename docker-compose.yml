@@ -1,0 +1,203 @@
+version: "3.9"
+
+# ============================================================
+#  Database-Driven IDS/IPS  –  Docker Compose
+# ============================================================
+
+networks:
+  idsips_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mongo_data:
+  redis_data:
+  nginx_logs:
+
+services:
+
+  # ----------------------------------------------------------
+  # TimescaleDB (PostgreSQL 16)
+  # ----------------------------------------------------------
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: idsips_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: idsips
+      POSTGRES_USER: idsips
+      POSTGRES_PASSWORD: idsips_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - idsips_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U idsips -d idsips"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ----------------------------------------------------------
+  # MongoDB 7
+  # ----------------------------------------------------------
+  mongodb:
+    image: mongo:7
+    container_name: idsips_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: idsips
+      MONGO_INITDB_ROOT_PASSWORD: mongo_secret
+      MONGO_INITDB_DATABASE: idsips
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ./db/mongo/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    networks:
+      - idsips_net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ----------------------------------------------------------
+  # Redis 7
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: idsips_redis
+    restart: unless-stopped
+    command: redis-server --requirepass redis_secret --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - idsips_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_secret", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------
+  # Detection / Prevention Engine
+  # ----------------------------------------------------------
+  engine:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    container_name: idsips_engine
+    restart: unless-stopped
+    network_mode: host          # Required for raw packet capture
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./engine:/app
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+  # ----------------------------------------------------------
+  # Threat Feed Ingester (same image, different entrypoint)
+  # ----------------------------------------------------------
+  threat_feed_ingester:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    container_name: idsips_threat_feed_ingester
+    restart: unless-stopped
+    command: python threat_feed_ingester.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./engine:/app
+    networks:
+      - idsips_net
+
+  # ----------------------------------------------------------
+  # REST / WebSocket API  (Flask)
+  # ----------------------------------------------------------
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: idsips_api
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./api:/app
+    networks:
+      - idsips_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ----------------------------------------------------------
+  # React / Next.js GUI
+  # ----------------------------------------------------------
+  gui:
+    build:
+      context: ./gui
+      dockerfile: Dockerfile
+    container_name: idsips_gui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    networks:
+      - idsips_net
+
+  # ----------------------------------------------------------
+  # NGINX reverse proxy (HTTP → HTTPS, SSL termination)
+  # ----------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: idsips_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+      - gui
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    networks:
+      - idsips_net
