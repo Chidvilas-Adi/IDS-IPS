@@ -23,16 +23,21 @@ def _db():
     return db
 
 
+def _clean(sql: str) -> str:
+    from app import app
+    if "sqlite" in app.config.get("SQLALCHEMY_DATABASE_URI", ""):
+        return sql.replace("::text", "").replace("ILIKE", "LIKE")
+    return sql
+
 def _fetchall(sql: str, params: dict | None = None) -> list[dict]:
     with _db().engine.connect() as conn:
-        result = conn.execute(text(sql), params or {})
+        result = conn.execute(text(_clean(sql)), params or {})
         cols = list(result.keys())
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
-
 def _fetchone(sql: str, params: dict | None = None) -> dict | None:
     with _db().engine.connect() as conn:
-        row = conn.execute(text(sql), params or {}).fetchone()
+        row = conn.execute(text(_clean(sql)), params or {}).fetchone()
     return dict(row._mapping) if row else None
 
 

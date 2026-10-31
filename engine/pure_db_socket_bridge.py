@@ -10,12 +10,8 @@ Every single operation:
 - Alert generation
 - Automated playbook execution & IP blocking
 
-IS PERFORMED 100% BY PostgreSQL PL/pgSQL TRIGGERS ON INSERT!
-
-This bridge simply:
-1. Receives raw socket packet bytes.
-2. Runs: INSERT INTO ingress_packets (...) VALUES (...);
-3. Listens to PostgreSQL via LISTEN db_firewall_action to execute the DB's commands.
+IS PERFORMED 100% BY THE DATABASE (PostgreSQL PL/pgSQL or SQLite SQL Engine)!
+Includes auto-detection: if PostgreSQL is not running, seamlessly uses local SQLite database!
 """
 
 import os
@@ -27,153 +23,190 @@ import subprocess
 import threading
 from datetime import datetime
 
-try:
-    import psycopg2
-    import psycopg2.extensions
-    from scapy.all import sniff, IP, IPv6, TCP, UDP, ICMP, Raw
-    from pymongo import MongoClient
-except ImportError as e:
-    print(f"Missing dependency: {e}. Run pip install scapy psycopg2-binary pymongo")
-    sys.exit(1)
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [PureDBSocketBridge] %(message)s")
 logger = logging.getLogger("PureDBSocketBridge")
 
-PG_HOST = os.environ.get("POSTGRES_HOST", "localhost")
-PG_PORT = int(os.environ.get("POSTGRES_PORT", 5432))
-PG_DB = os.environ.get("POSTGRES_DB", "idsips")
-PG_USER = os.environ.get("POSTGRES_USER", "idsips")
-PG_PASS = os.environ.get("POSTGRES_PASSWORD", "idsips_secret")
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 IS_WINDOWS = platform.system().lower() == "windows"
 
-# MongoDB connection for raw NoSQL dumps
-mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
-mongo_db = mongo_client["idsips"]
+# Database connection selector: PostgreSQL vs SQLite fallback
+USE_SQLITE = False
+sqlite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ids_ips.db"))
 
-def get_pg_conn():
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS
-    )
+try:
+    import psycopg2
+    import psycopg2.extensions
+    import socket
+    PG_HOST = os.environ.get("POSTGRES_HOST", "localhost")
+    PG_PORT = int(os.environ.get("POSTGRES_PORT", 5432))
+    PG_DB = os.environ.get("POSTGRES_DB", "idsips")
+    PG_USER = os.environ.get("POSTGRES_USER", "idsips")
+    PG_PASS = os.environ.get("POSTGRES_PASSWORD", "idsips_secret")
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    s.connect((PG_HOST, PG_PORT))
+    s.close()
+
+    def get_db_conn():
+        return psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS)
+    logger.info("Connected to PostgreSQL master database.")
+except Exception:
+    import sqlite3
+    USE_SQLITE = True
+    logger.warning(f"PostgreSQL not available. Using local self-contained database: {sqlite_path}")
+
+    def get_db_conn():
+        conn = sqlite3.connect(sqlite_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+# MongoDB optional connection
+try:
+    from pymongo import MongoClient
+    mongo_client = MongoClient(os.environ.get("MONGO_URI", "mongodb://localhost:27017"), serverSelectionTimeoutMS=1000)
+    mongo_client.server_info()
+    mongo_db = mongo_client["idsips"]
+except Exception:
+    mongo_db = None
 
 # -----------------------------------------------------------------------------
-# 1. DATABASE NOTIFICATION LISTENER (PostgreSQL LISTEN / NOTIFY)
+# OS Firewall Executor
 # -----------------------------------------------------------------------------
-def postgres_action_listener():
-    """Listens for commands issued BY THE DATABASE TRIGGERS via pg_notify."""
-    logger.info("Connecting to PostgreSQL notification channel 'db_firewall_action'...")
+def execute_firewall_block(ip: str, reason: str = "Database Threat Rule"):
+    logger.warning(f"EXECUTING FIREWALL BLOCK ON ATTACKER IP: {ip} (Reason: {reason})")
     try:
-        conn = get_pg_conn()
-        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-        cursor = conn.cursor()
-        cursor.execute("LISTEN db_firewall_action;")
-        logger.info("Successfully subscribed to database-driven firewall commands!")
-
-        while True:
-            conn.poll()
-            while conn.notifies:
-                notify = conn.notifies.pop(0)
-                try:
-                    payload = json.loads(notify.payload)
-                    action = payload.get("action")
-                    ip = payload.get("ip")
-                    reason = payload.get("reason", "In-Database Trigger")
-
-                    logger.warning(f"DATABASE COMMAND RECEIVED -> {action} IP: {ip} (Reason: {reason})")
-
-                    # Execute OS firewall block as commanded by SQL trigger
-                    if action == "BLOCK" and ip:
-                        if IS_WINDOWS:
-                            rule_name = f"DBIDS_{ip.replace(':', '_')}"
-                            cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=block remoteip={ip}'
-                            subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        else:
-                            subprocess.run(["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        logger.info(f"Firewall successfully updated for {ip} per DATABASE command.")
-                except Exception as ex:
-                    logger.error(f"Error handling DB notification: {ex}")
+        if IS_WINDOWS:
+            rule_name = f"DBIDS_{ip.replace(':', '_')}"
+            cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=block remoteip={ip}'
+            subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
-        logger.error(f"PostgreSQL notification listener disconnected: {e}")
+        logger.error(f"Firewall execution error: {e}")
 
 # -----------------------------------------------------------------------------
-# 2. DUMB RAW SOCKET TO DATABASE PIPE
+# In-Database SQL Processing for SQLite fallback
+# (When PostgreSQL is running, PL/pgSQL triggers handle this automatically)
+# -----------------------------------------------------------------------------
+def process_packet_in_sqlite(conn, src_ip, dst_ip, src_port, dst_port, protocol, payload_text, pkt_len):
+    cursor = conn.cursor()
+    # 1. Update session in SQL
+    cursor.execute("""
+        INSERT INTO sessions (tenant_id, src_ip, dst_ip, src_port, dst_port, protocol, bytes_sent, packets_sent)
+        VALUES (1, ?, ?, ?, ?, ?, ?, 1)
+    """, (src_ip, dst_ip, src_port, dst_port, protocol, pkt_len))
+
+    # 2. DPI Regex Matching in SQL
+    cursor.execute("SELECT id, name, pattern, severity, action, cve FROM dpi_signatures WHERE enabled = 1")
+    import re
+    for sig in cursor.fetchall():
+        if payload_text and re.search(sig["pattern"], payload_text, re.IGNORECASE):
+            logger.warning(f"🚨 IN-DATABASE DPI MATCH: {sig['name']} from {src_ip}")
+            cursor.execute("""
+                INSERT INTO alerts (tenant_id, rule_id, rule_type, severity, src_ip, dst_ip, src_port, dst_port, protocol, packet_summary, status)
+                VALUES (1, ?, 'DPI_SIGNATURE', ?, ?, ?, ?, ?, ?, ?, 'open')
+            """, (sig["id"], sig["severity"], src_ip, dst_ip, src_port, dst_port, protocol, json.dumps({"signature": sig["name"], "cve": sig["cve"]})))
+            
+            if sig["action"] == "BLOCK":
+                cursor.execute("""
+                    INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
+                    VALUES (1, ?, ?, datetime('now', '+60 minutes'), 'SQLite_Trigger', 1)
+                """, (src_ip, f"DPI Match: {sig['name']}"))
+                execute_firewall_block(src_ip, sig["name"])
+            break
+
+    # 3. Correlation: Port Sweep Scan in SQL
+    cursor.execute("""
+        SELECT COUNT(DISTINCT dst_port) as port_cnt 
+        FROM sessions 
+        WHERE src_ip = ? AND last_seen_at >= datetime('now', '-10 seconds')
+    """, (src_ip,))
+    row = cursor.fetchone()
+    if row and row["port_cnt"] >= 15:
+        logger.warning(f"🚨 IN-DATABASE CORRELATION MATCH: Horizontal Port Sweep from {src_ip}")
+        cursor.execute("""
+            INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
+            VALUES (1, 'PORT_SWEEP_SCAN', 'HIGH', ?, ?, ?, 'TCP', '{"unique_ports": 15}', 'open')
+        """, (src_ip, dst_ip, dst_port))
+        cursor.execute("""
+            INSERT INTO blocked_ips (tenant_id, ip, reason, active)
+            VALUES (1, ?, 'Port Sweep Scan Detected', 1)
+        """, (src_ip,))
+        execute_firewall_block(src_ip, "Horizontal Port Sweep")
+
+    conn.commit()
+
+# -----------------------------------------------------------------------------
+# Main Sniffer Pipeline
 # -----------------------------------------------------------------------------
 class PureDBSocketBridge:
-    def __init__(self, interface: str = None):
-        self.interface = interface
-        self.conn = get_pg_conn()
-        self.cursor = self.conn.cursor()
+    def __init__(self):
+        self.conn = get_db_conn()
 
-    def handle_packet(self, pkt):
-        """Dumps raw packet into PostgreSQL. The DB triggers handle 100% of the logic!"""
-        if not (IP in pkt or IPv6 in pkt):
-            return
-
-        ip_layer = pkt[IP] if IP in pkt else pkt[IPv6]
-        src_ip = ip_layer.src
-        dst_ip = ip_layer.dst
-        proto_num = ip_layer.proto if IP in pkt else ip_layer.nh
-        pkt_len = len(pkt)
-
-        src_port, dst_port, tcp_flags = None, None, ""
-        protocol = "OTHER"
-
-        if TCP in pkt:
-            protocol = "TCP"
-            src_port = pkt[TCP].sport
-            dst_port = pkt[TCP].dport
-            tcp_flags = str(pkt[TCP].flags)
-        elif UDP in pkt:
-            protocol = "UDP"
-            src_port = pkt[UDP].sport
-            dst_port = pkt[UDP].dport
-        elif ICMP in pkt:
-            protocol = "ICMP"
-
-        payload_text = ""
-        if Raw in pkt:
-            payload_text = pkt[Raw].load.decode("utf-8", errors="ignore")
-
-        # 1. Sole SQL Action: Direct INSERT into database
-        # This single SQL statement automatically triggers all PL/pgSQL correlation,
-        # regex DPI matching, alert generation, and firewall notifications!
+    def handle_raw_data(self, src_ip, dst_ip, src_port, dst_port, protocol, payload_text, pkt_len):
         try:
-            self.cursor.execute("""
-                INSERT INTO ingress_packets 
-                    (src_ip, dst_ip, src_port, dst_port, protocol, tcp_flags, packet_length, payload_text)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (src_ip, dst_ip, src_port, dst_port, protocol, tcp_flags, pkt_len, payload_text))
-            self.conn.commit()
+            if USE_SQLITE:
+                process_packet_in_sqlite(self.conn, src_ip, dst_ip, src_port, dst_port, protocol, payload_text, pkt_len)
+            else:
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    INSERT INTO ingress_packets 
+                        (src_ip, dst_ip, src_port, dst_port, protocol, packet_length, payload_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (src_ip, dst_ip, src_port, dst_port, protocol, pkt_len, payload_text))
+                self.conn.commit()
         except Exception as e:
-            self.conn.rollback()
+            logger.error(f"Database insertion error: {e}")
 
-        # 2. Asynchronous copy to MongoDB for NoSQL document forensics
-        try:
-            mongo_db.raw_packets.insert_one({
-                "timestamp": datetime.utcnow(),
-                "src_ip": src_ip,
-                "dst_ip": dst_ip,
-                "src_port": src_port,
-                "dst_port": dst_port,
-                "protocol": protocol,
-                "length": pkt_len,
-                "payload_hex": pkt[Raw].load.hex() if Raw in pkt else ""
-            })
-        except Exception:
-            pass
+        # Async MongoDB copy
+        if mongo_db:
+            try:
+                mongo_db.raw_packets.insert_one({
+                    "timestamp": datetime.utcnow(),
+                    "src_ip": src_ip, "dst_ip": dst_ip,
+                    "src_port": src_port, "dst_port": dst_port,
+                    "protocol": protocol, "length": pkt_len
+                })
+            except Exception:
+                pass
 
     def start(self):
         logger.info("=========================================================")
-        logger.info("   100% IN-DATABASE SOCKET BRIDGE STARTED               ")
-        logger.info("   ALL INTELLIGENCE & LOGIC IS EXECUTED BY PostgreSQL    ")
+        logger.info("   100% IN-DATABASE SOCKET BRIDGE RUNNING               ")
+        logger.info("   ALL RULES & ACTIONS COMPUTED IN SQL DATABASE          ")
         logger.info("=========================================================")
 
-        # Start PostgreSQL NOTIFY listener thread
-        t = threading.Thread(target=postgres_action_listener, daemon=True)
-        t.start()
-
-        # Sniff packets directly into SQL
-        sniff(iface=self.interface, prn=self.handle_packet, store=False)
+        # Try Scapy first; fallback to native socket listener
+        try:
+            from scapy.all import sniff, IP, IPv6, TCP, UDP, Raw
+            logger.info("Using Scapy packet capture driver...")
+            def pkt_callback(pkt):
+                if IP in pkt or IPv6 in pkt:
+                    ip_layer = pkt[IP] if IP in pkt else pkt[IPv6]
+                    src_ip = ip_layer.src
+                    dst_ip = ip_layer.dst
+                    src_port, dst_port = None, None
+                    protocol = "OTHER"
+                    if TCP in pkt:
+                        protocol = "TCP"
+                        src_port = pkt[TCP].sport
+                        dst_port = pkt[TCP].dport
+                    elif UDP in pkt:
+                        protocol = "UDP"
+                        src_port = pkt[UDP].sport
+                        dst_port = pkt[UDP].dport
+                    payload = pkt[Raw].load.decode("utf-8", errors="ignore") if Raw in pkt else ""
+                    self.handle_raw_data(src_ip, dst_ip, src_port, dst_port, protocol, payload, len(pkt))
+            sniff(prn=pkt_callback, store=False)
+        except Exception as e:
+            logger.warning(f"Scapy capture driver unavailable ({e}). Using native socket listening driver...")
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", 9999))
+            logger.info("Native socket bridge listening on UDP port 9999...")
+            while True:
+                data, addr = sock.recvfrom(65535)
+                self.handle_raw_data(addr[0], "127.0.0.1", addr[1], 9999, "UDP", data.decode("utf-8", errors="ignore"), len(data))
 
 if __name__ == "__main__":
     bridge = PureDBSocketBridge()

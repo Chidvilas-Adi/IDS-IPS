@@ -44,7 +44,8 @@ chmod +x single_click_attack.sh
 
 While attacking from Laptop B, open Laptop A's dashboard in Laptop B's browser:
 ```
-http://10.30.201.26:3000
+http://10.30.201.26:5000
+(or http://10.30.201.26:3000 if using Node GUI)
 ```
 - Login with `admin` / `admin123`.
 - Watch the **Alert Feed** light up via real-time WebSocket.
