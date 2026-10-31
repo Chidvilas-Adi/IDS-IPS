@@ -25,7 +25,7 @@ try {
 Write-Host "[*] Host Machine IP (Laptop A): " -NoNewline
 Write-Host "$localIp" -ForegroundColor Green
 Write-Host "[*] Target URL for Laptop B:    " -NoNewline
-Write-Host "http://$localIp:3000" -ForegroundColor Yellow
+Write-Host "http://$localIp:5000" -ForegroundColor Yellow
 Write-Host "-----------------------------------------------------------------" -ForegroundColor Cyan
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -60,15 +60,15 @@ if ($hasDocker) {
     $engineJob = Start-Process -FilePath "python" -ArgumentList "pure_db_socket_bridge.py" -WorkingDirectory "$projectRoot\engine" -PassThru
 }
 
-# 3. Launch React Dashboard GUI
-Write-Host "[+] Launching Dashboard..." -ForegroundColor Green
-Start-Process "http://localhost:3000" -ErrorAction SilentlyContinue
+# 3. Launch Integrated SOC Dashboard GUI
+Write-Host "[+] Launching Dashboard on http://localhost:5000..." -ForegroundColor Green
+Start-Process "http://localhost:5000" -ErrorAction SilentlyContinue
 
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "   ALL DB-IDS/IPS COMPONENTS ARE RUNNING & INTERCEPTING PACKETS! " -ForegroundColor Green
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "1. Dashboard URL (Local):    http://localhost:3000" -ForegroundColor White
-Write-Host "2. Dashboard URL (Laptop B): http://${localIp}:3000" -ForegroundColor White
+Write-Host "1. Dashboard URL (Local):    http://localhost:5000" -ForegroundColor White
+Write-Host "2. Dashboard URL (Laptop B): http://${localIp}:5000" -ForegroundColor White
 Write-Host "3. Default SOC Login:        admin / admin123" -ForegroundColor White
 Write-Host "4. Laptop B Testing Suite:   Inside folder '\laptop_b'" -ForegroundColor Yellow
 Write-Host "-----------------------------------------------------------------" -ForegroundColor Cyan

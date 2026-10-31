@@ -59,7 +59,7 @@ def stress_worker(target_ip: str, port: int, packet_type: str, stop_event: threa
 def main():
     parser = argparse.ArgumentParser(description="High-Rate Network Stress Tester")
     parser.add_argument("--target", default="10.30.201.26", help="Laptop A IP (default: 10.30.201.26)")
-    parser.add_argument("--port", type=int, default=80, help="Target port (default: 80)")
+    parser.add_argument("--port", type=int, default=5000, help="Target port (default: 5000)")
     parser.add_argument("--proto", choices=["UDP", "TCP", "HTTP"], default="UDP", help="Protocol to flood")
     parser.add_argument("--threads", type=int, default=16, help="Concurrent flooding threads (default: 16)")
     parser.add_argument("--duration", type=int, default=10, help="Duration in seconds (default: 10)")

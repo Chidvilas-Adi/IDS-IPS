@@ -334,5 +334,18 @@ def health():
     })
 
 if __name__ == "__main__":
-    logger.info("Starting DB-IDS/IPS API Server on http://0.0.0.0:5000...")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get("PORT", 5000))
+    try:
+        import socket
+        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_sock.bind(("0.0.0.0", port))
+        test_sock.close()
+    except OSError:
+        logger.warning(f"Port {port} is occupied or reserved. Switching to alternative port 5001...")
+        port = 5001
+
+    logger.info(f"=========================================================")
+    logger.info(f"   DB-IDS/IPS DASHBOARD & API ACTIVE: http://localhost:{port} ")
+    logger.info(f"   NETWORK ADDRESS: http://10.30.201.26:{port}              ")
+    logger.info(f"=========================================================")
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)

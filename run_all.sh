@@ -10,7 +10,7 @@ echo "================================================================="
 if command -v docker &> /dev/null && docker compose version &> /dev/null; then
     echo "[+] Starting all containers with Docker Compose..."
     docker compose up -d
-    echo "[+] System online at http://localhost:3000"
+    echo "[+] System online at http://localhost:5000"
     exit 0
 fi
 
@@ -26,7 +26,7 @@ echo "================================================================="
 echo "   SYSTEM ONLINE & INTERCEPTING PACKETS!                        "
 echo "================================================================="
 echo "API PID: $API_PID | Engine PID: $ENGINE_PID"
-echo "Dashboard: http://localhost:3000"
+echo "Dashboard: http://localhost:5000"
 echo "Laptop B Scripts located in: ./laptop_b/"
 
 trap "kill $API_PID $ENGINE_PID 2>/dev/null; exit" SIGINT SIGTERM

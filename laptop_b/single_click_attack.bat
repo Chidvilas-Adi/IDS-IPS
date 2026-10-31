@@ -3,8 +3,9 @@ setlocal enabledelayedexpansion
 title DB-IDS/IPS Attack & Stress Suite (Laptop B)
 color 0A
 
-:: Default Target IP of Laptop A
+:: Default Target IP & Port of Laptop A
 set TARGET_IP=10.30.201.26
+set TARGET_PORT=5000
 
 :MENU
 cls
@@ -42,36 +43,36 @@ goto MENU
 
 :RUN_ALL
 cls
-echo [*] Running full attack suite against %TARGET_IP%...
-python attack_simulator.py --target %TARGET_IP% --mode all
+echo [*] Running full attack suite against %TARGET_IP%:%TARGET_PORT%...
+python attack_simulator.py --target %TARGET_IP% --port %TARGET_PORT% --mode all
 pause
 goto MENU
 
 :RUN_SQLI
 cls
-echo [*] Sending SQL Injection exploit packets to %TARGET_IP%...
-python attack_simulator.py --target %TARGET_IP% --mode sqli
+echo [*] Sending SQL Injection exploit packets to %TARGET_IP%:%TARGET_PORT%...
+python attack_simulator.py --target %TARGET_IP% --port %TARGET_PORT% --mode sqli
 pause
 goto MENU
 
 :RUN_LOG4SHELL
 cls
-echo [*] Sending Log4Shell exploit payload to %TARGET_IP%...
-python attack_simulator.py --target %TARGET_IP% --mode log4shell
+echo [*] Sending Log4Shell exploit payload to %TARGET_IP%:%TARGET_PORT%...
+python attack_simulator.py --target %TARGET_IP% --port %TARGET_PORT% --mode log4shell
 pause
 goto MENU
 
 :RUN_EICAR
 cls
-echo [*] Sending EICAR antivirus test signature to %TARGET_IP%...
-python attack_simulator.py --target %TARGET_IP% --mode eicar
+echo [*] Sending EICAR antivirus test signature to %TARGET_IP%:%TARGET_PORT%...
+python attack_simulator.py --target %TARGET_IP% --port %TARGET_PORT% --mode eicar
 pause
 goto MENU
 
 :RUN_PORTSCAN
 cls
 echo [*] Executing 20-port sweep scan against %TARGET_IP%...
-python attack_simulator.py --target %TARGET_IP% --mode portscan
+python attack_simulator.py --target %TARGET_IP% --port %TARGET_PORT% --mode portscan
 pause
 goto MENU
 
@@ -85,21 +86,21 @@ goto MENU
 :RUN_STRESS_UDP
 cls
 echo [*] Starting high-volume UDP flood (16 threads, 10 seconds)...
-python stress_test.py --target %TARGET_IP% --proto UDP --threads 16 --duration 10
+python stress_test.py --target %TARGET_IP% --port %TARGET_PORT% --proto UDP --threads 16 --duration 10
 pause
 goto MENU
 
 :RUN_STRESS_TCP
 cls
 echo [*] Starting high-rate TCP connection flood (16 threads, 10 seconds)...
-python stress_test.py --target %TARGET_IP% --proto TCP --threads 16 --duration 10
+python stress_test.py --target %TARGET_IP% --port %TARGET_PORT% --proto TCP --threads 16 --duration 10
 pause
 goto MENU
 
 :RUN_BENIGN
 cls
 echo [*] Generating benign browsing activity...
-python attack_simulator.py --target %TARGET_IP% --mode benign
+python attack_simulator.py --target %TARGET_IP% --port %TARGET_PORT% --mode benign
 pause
 goto MENU
 

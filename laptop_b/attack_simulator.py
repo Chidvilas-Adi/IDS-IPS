@@ -243,7 +243,7 @@ def test_benign(target: str):
 def main():
     parser = argparse.ArgumentParser(description="DB-IDS/IPS Attack & Stress Simulator")
     parser.add_argument("--target", default="127.0.0.1", help="Target IP running DB-IDS/IPS (e.g. 10.30.201.26)")
-    parser.add_argument("--port", type=int, default=80, help="Target service port (default: 80)")
+    parser.add_argument("--port", type=int, default=5000, help="Target service port (default: 5000)")
     parser.add_argument("--mode", default="all", choices=["all", "sqli", "log4shell", "eicar", "portscan", "sshbrute", "flood", "benign"],
                         help="Attack pattern to simulate")
     parser.add_argument("--flood-duration", type=int, default=5, help="Seconds to run flood stress test")
