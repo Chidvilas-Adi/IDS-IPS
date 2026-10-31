@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DB-IDS/IPS ULTRA — Real-Time SOC Dashboard</title>
+  <title>DB-IDS/IPS ULTRA — Port 1234 Dedicated SOC Console</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,146 +16,249 @@
 </head>
 <body class="text-slate-100 min-h-screen flex flex-col">
 
-  <!-- Top Header Navigation -->
-  <header class="bg-slate-900/90 border-b border-slate-800 px-6 py-4 flex justify-between items-center sticky top-0 z-50 backdrop-blur">
+  <!-- Top Header Navigation Bar -->
+  <header class="bg-slate-900/90 border-b border-slate-800 px-6 py-4 flex flex-wrap justify-between items-center sticky top-0 z-50 backdrop-blur">
     <div class="flex items-center gap-3">
-      <div class="w-3 h-3 rounded-full bg-emerald-400 animate-pulse"></div>
-      <span class="font-bold text-lg tracking-tight bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
+      <div class="w-3.5 h-3.5 rounded-full bg-emerald-400 animate-pulse"></div>
+      <span class="font-bold text-xl tracking-tight bg-gradient-to-r from-indigo-400 via-cyan-400 to-emerald-400 bg-clip-text text-transparent">
         DB-IDS/IPS ULTRA
       </span>
-      <span class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">
-        100% DATABASE-DRIVEN
+      <span class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 font-mono">
+        DEDICATED PORT: 1234
       </span>
     </div>
-    <div class="flex items-center gap-4 text-xs font-mono">
-      <span class="text-slate-400">HOST: <strong class="text-white">10.30.201.26</strong></span>
-      <span class="text-slate-400">ENGINE: <strong class="text-emerald-400">ACTIVE (PL/pgSQL)</strong></span>
+    
+    <div class="flex items-center gap-4 text-xs font-mono mt-2 sm:mt-0">
+      <span class="text-slate-400">HOST: <strong class="text-white">10.30.201.26:1234</strong></span>
+      <span class="text-slate-400">DATABASE BRAIN: <strong class="text-emerald-400">100% IN-DATABASE</strong></span>
       <a href="/api/compliance/reports/export" target="_blank" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded transition text-slate-200">
         Export Audit Report
       </a>
     </div>
   </header>
 
-  <!-- Main Content Dashboard -->
+  <!-- Main View Container -->
   <main class="flex-1 p-6 space-y-6 max-w-7xl mx-auto w-full">
 
     <!-- Top Metric Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
       <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg">
-        <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Total Alerts Today</span>
-        <div class="text-2xl font-bold text-rose-400" id="stat-alerts">0</div>
-        <span class="text-[11px] text-slate-500 font-mono">Triggered via PL/pgSQL</span>
+        <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Total Attacks Intercepted</span>
+        <div class="text-3xl font-bold text-rose-400" id="stat-alerts">0</div>
+        <span class="text-[11px] text-slate-500 font-mono">Triggered via SQL Trigger Engine</span>
       </div>
       <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg">
         <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Active Blocked Attacker IPs</span>
-        <div class="text-2xl font-bold text-amber-400" id="stat-blocked">0</div>
-        <span class="text-[11px] text-slate-500 font-mono">Synchronized with Firewall</span>
+        <div class="text-3xl font-bold text-amber-400" id="stat-blocked">0</div>
+        <span class="text-[11px] text-slate-500 font-mono">Synchronized with Firewall Drop</span>
       </div>
       <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg">
         <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Tracked Socket Sessions</span>
-        <div class="text-2xl font-bold text-indigo-400" id="stat-sessions">0</div>
-        <span class="text-[11px] text-slate-500 font-mono">Stateful DB Tracking</span>
+        <div class="text-3xl font-bold text-indigo-400" id="stat-sessions">0</div>
+        <span class="text-[11px] text-slate-500 font-mono">Stateful DB Table Tracking</span>
       </div>
       <div class="bg-slate-900/80 border border-slate-800 p-4 rounded-xl shadow-lg">
-        <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">Database Engine Status</span>
-        <div class="text-2xl font-bold text-emerald-400">HEALTHY</div>
-        <span class="text-[11px] text-slate-500 font-mono">PostgreSQL / SQLite</span>
+        <span class="text-xs text-slate-400 uppercase tracking-wider block mb-1">System Health & Port</span>
+        <div class="text-3xl font-bold text-emerald-400">PORT 1234</div>
+        <span class="text-[11px] text-emerald-400/80 font-mono">Active & Listening</span>
       </div>
     </div>
 
-    <!-- Live Real-Time Alert Stream -->
-    <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
-      <div class="flex justify-between items-center">
-        <div>
-          <h2 class="font-bold text-lg text-white flex items-center gap-2">
-            <span>🚨 Live Real-Time Alert Stream (WebSocket Powered)</span>
-          </h2>
-          <p class="text-xs text-slate-400">Incoming alerts fired by database DPI and sliding-window correlation rules.</p>
-        </div>
-        <span class="text-xs text-emerald-400 font-mono flex items-center gap-1.5">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span> Live Listening
-        </span>
-      </div>
-
-      <div class="overflow-x-auto">
-        <table class="w-full text-left text-sm">
-          <thead class="bg-slate-950/80 text-slate-400 border-b border-slate-800 text-xs">
-            <tr>
-              <th class="p-3">Timestamp</th>
-              <th class="p-3">Severity</th>
-              <th class="p-3">Rule / Attack Vector</th>
-              <th class="p-3">Attacker IP</th>
-              <th class="p-3">Target Socket</th>
-              <th class="p-3">Protocol</th>
-              <th class="p-3">Action</th>
-            </tr>
-          </thead>
-          <tbody id="alerts-tbody" class="divide-y divide-slate-800/60 font-mono text-xs">
-            <tr class="text-slate-500 text-center">
-              <td colspan="7" class="p-6">No attacks detected yet. Fire attacks from Laptop B to watch them appear here!</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Active Blocklist & DPI Signatures Grid -->
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-      
-      <!-- Blocklist Card -->
-      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
-        <h3 class="font-bold text-white flex items-center gap-2">
-          <span>🛡️ Active Firewall Blocklist (Auto-Drop)</span>
+    <!-- Quick In-Browser Attack Test Panel -->
+    <div class="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-indigo-500/30 rounded-xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h3 class="font-bold text-sm text-indigo-300 flex items-center gap-2">
+          <span>🧪 1-Click In-App Attack Simulator (Test Database Triggers Directly from Browser)</span>
         </h3>
-        <div class="overflow-x-auto max-h-64 overflow-y-auto">
+        <p class="text-xs text-slate-400">Click any attack button below to trigger database DPI regexes and sliding-window rules without terminal commands:</p>
+      </div>
+      <div class="flex flex-wrap gap-2 text-xs">
+        <button onclick="triggerSimulate('sqli')" class="bg-rose-600 hover:bg-rose-500 text-white font-medium px-3 py-1.5 rounded-lg transition shadow">
+          💥 Test SQLi
+        </button>
+        <button onclick="triggerSimulate('log4shell')" class="bg-purple-600 hover:bg-purple-500 text-white font-medium px-3 py-1.5 rounded-lg transition shadow">
+          💥 Test Log4Shell
+        </button>
+        <button onclick="triggerSimulate('portscan')" class="bg-amber-600 hover:bg-amber-500 text-white font-medium px-3 py-1.5 rounded-lg transition shadow">
+          💥 Test Port Sweep
+        </button>
+        <button onclick="triggerSimulate('sshbrute')" class="bg-cyan-600 hover:bg-cyan-500 text-white font-medium px-3 py-1.5 rounded-lg transition shadow">
+          💥 Test SSH Brute
+        </button>
+        <button onclick="triggerSimulate('canary')" class="bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-3 py-1.5 rounded-lg transition shadow">
+          🍯 Test Canary Honey-Token
+        </button>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <div class="flex border-b border-slate-800 gap-6 text-sm font-medium">
+      <button onclick="showTab('tab-alerts')" id="btn-tab-alerts" class="tab-btn pb-3 text-indigo-400 border-b-2 border-indigo-400 font-semibold">
+        🚨 Live Threat Stream
+      </button>
+      <button onclick="showTab('tab-blocklist')" id="btn-tab-blocklist" class="tab-btn pb-3 text-slate-400 hover:text-slate-200">
+        🛡️ Active Firewall Blocklist
+      </button>
+      <button onclick="showTab('tab-rules')" id="btn-tab-rules" class="tab-btn pb-3 text-slate-400 hover:text-slate-200">
+        📜 Database DPI Signatures & Rules
+      </button>
+      <button onclick="showTab('tab-compliance')" id="btn-tab-compliance" class="tab-btn pb-3 text-slate-400 hover:text-slate-200">
+        📋 Compliance (PCI-DSS/HIPAA)
+      </button>
+      <button onclick="showTab('tab-canary')" id="btn-tab-canary" class="tab-btn pb-3 text-slate-400 hover:text-slate-200">
+        🍯 Canary Deception Vault
+      </button>
+    </div>
+
+    <!-- TAB 1: Live Alert Stream -->
+    <div id="tab-alerts" class="space-y-4">
+      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
+        <div class="flex justify-between items-center">
+          <div>
+            <h2 class="font-bold text-lg text-white flex items-center gap-2">
+              <span>Real-Time WebSocket Threat Interceptor</span>
+            </h2>
+            <p class="text-xs text-slate-400">Packets inspected and correlated directly inside SQL database triggers.</p>
+          </div>
+          <span class="text-xs text-emerald-400 font-mono flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span> Live on Port 1234
+          </span>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-slate-800 text-xs">
+              <tr>
+                <th class="p-3">Timestamp</th>
+                <th class="p-3">Severity</th>
+                <th class="p-3">Threat Detection Rule</th>
+                <th class="p-3">Attacker IP</th>
+                <th class="p-3">Target Socket</th>
+                <th class="p-3">Protocol</th>
+                <th class="p-3">Action</th>
+              </tr>
+            </thead>
+            <tbody id="alerts-tbody" class="divide-y divide-slate-800/60 font-mono text-xs">
+              <tr class="text-slate-500 text-center">
+                <td colspan="7" class="p-6">Listening for incoming threats... Use the buttons above or attack from Laptop B!</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: Active Blocklist -->
+    <div id="tab-blocklist" class="space-y-4 hidden">
+      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
+        <div class="flex justify-between items-center">
+          <h2 class="font-bold text-lg text-white">Active Firewall Blocklist (Auto-Drop via Database)</h2>
+          <div class="flex gap-2">
+            <input type="text" id="manual-ip-input" placeholder="IP to block (e.g. 192.168.1.50)" class="bg-slate-950 border border-slate-800 px-3 py-1.5 rounded text-xs text-white">
+            <button onclick="addManualBlock()" class="bg-rose-600 hover:bg-rose-500 text-white px-3 py-1.5 rounded text-xs font-semibold">Block IP</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
           <table class="w-full text-left text-xs font-mono">
             <thead class="bg-slate-950 text-slate-400 border-b border-slate-800">
               <tr>
-                <th class="p-2.5">Blocked IP</th>
-                <th class="p-2.5">Reason</th>
-                <th class="p-2.5">Action</th>
+                <th class="p-3">Blocked IP</th>
+                <th class="p-3">Trigger Reason</th>
+                <th class="p-3">Expires At</th>
+                <th class="p-3">Action</th>
               </tr>
             </thead>
             <tbody id="blocked-tbody" class="divide-y divide-slate-800/60">
-              <tr class="text-slate-500 text-center"><td colspan="3" class="p-4">Blocklist is clean.</td></tr>
+              <tr class="text-slate-500 text-center"><td colspan="4" class="p-6">No IPs currently blocked.</td></tr>
             </tbody>
           </table>
         </div>
       </div>
+    </div>
 
-      <!-- Database Rules & Signatures -->
+    <!-- TAB 3: Database DPI Signatures & Correlation Rules -->
+    <div id="tab-rules" class="space-y-4 hidden">
       <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
-        <h3 class="font-bold text-white flex items-center gap-2">
-          <span>📜 Active Database DPI Signatures (In SQL)</span>
-        </h3>
-        <div class="overflow-x-auto max-h-64 overflow-y-auto">
+        <h2 class="font-bold text-lg text-white">Active In-Database DPI Signatures (dpi_signatures table)</h2>
+        <div class="overflow-x-auto">
           <table class="w-full text-left text-xs font-mono">
             <thead class="bg-slate-950 text-slate-400 border-b border-slate-800">
               <tr>
-                <th class="p-2.5">Signature Name</th>
-                <th class="p-2.5">Pattern</th>
-                <th class="p-2.5">Action</th>
+                <th class="p-3">Signature Name</th>
+                <th class="p-3">Protocol</th>
+                <th class="p-3">Regex / Byte Pattern</th>
+                <th class="p-3">Severity</th>
+                <th class="p-3">Action</th>
               </tr>
             </thead>
             <tbody id="signatures-tbody" class="divide-y divide-slate-800/60">
-              <!-- Loaded via JavaScript -->
+              <!-- Populated via API -->
             </tbody>
           </table>
         </div>
       </div>
+    </div>
 
+    <!-- TAB 4: Compliance Auditor -->
+    <div id="tab-compliance" class="space-y-4 hidden">
+      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
+        <div class="flex justify-between items-center">
+          <div>
+            <h2 class="font-bold text-lg text-white">Automated PCI-DSS, HIPAA & SOC2 Compliance Controls</h2>
+            <p class="text-xs text-slate-400">Evaluates SQL validation queries directly in the database.</p>
+          </div>
+          <button onclick="runComplianceChecks()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-xs font-semibold">
+            Evaluate All Controls Now
+          </button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-950 text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="p-3">Framework</th>
+                <th class="p-3">Control Name</th>
+                <th class="p-3">Description</th>
+                <th class="p-3">Status</th>
+              </tr>
+            </thead>
+            <tbody id="compliance-tbody" class="divide-y divide-slate-800/60 font-mono">
+              <!-- Populated via API -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 5: Canary Honey-Tokens -->
+    <div id="tab-canary" class="space-y-4 hidden">
+      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
+        <h2 class="font-bold text-lg text-white">Canary Honey-Tokens (Insider Threat Deception)</h2>
+        <p class="text-xs text-slate-400">These fake tables/views trigger a database alert whenever queried via standard SELECT.</p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
+          <div class="p-4 bg-slate-950 rounded-lg border border-slate-800">
+            <span class="text-indigo-400 font-bold block mb-1">canary_aws_admin_vault</span>
+            <span class="text-slate-400 block mb-2">Planted decoy AWS IAM credentials honey-token</span>
+            <span class="text-emerald-400">State: ARMED (SELECT fires CRITICAL alert)</span>
+          </div>
+          <div class="p-4 bg-slate-950 rounded-lg border border-slate-800">
+            <span class="text-indigo-400 font-bold block mb-1">canary_root_credentials</span>
+            <span class="text-slate-400 block mb-2">Planted decoy DB admin password honey-token</span>
+            <span class="text-emerald-400">State: ARMED (SELECT fires CRITICAL alert)</span>
+          </div>
+        </div>
+      </div>
     </div>
 
   </main>
 
   <script>
-    // 1. WebSocket Connection to Live Alert Stream
+    // 1. WebSocket Connection to Port 1234
     const socket = io();
     const alertsTbody = document.getElementById('alerts-tbody');
     let hasAlerts = false;
 
     socket.on('connect', () => {
-      console.log('Connected to DB-IDS/IPS WebSocket stream!');
+      console.log('Connected to DB-IDS/IPS WebSocket on Port 1234!');
     });
 
     socket.on('new_alert', (alert) => {
@@ -175,7 +278,7 @@
         <td class="p-3"><span class="px-2 py-0.5 rounded border ${badgeColor}">${alert.severity}</span></td>
         <td class="p-3 font-semibold text-white">${alert.rule_type || 'EXPLOIT_DETECTED'}</td>
         <td class="p-3 text-rose-400 font-bold">${alert.src_ip}</td>
-        <td class="p-3 text-slate-300">${alert.dst_ip}:${alert.dst_port || 80}</td>
+        <td class="p-3 text-slate-300">${alert.dst_ip}:${alert.dst_port || 1234}</td>
         <td class="p-3 text-indigo-400">${alert.protocol || 'TCP'}</td>
         <td class="p-3"><button onclick="blockManual('${alert.src_ip}')" class="bg-rose-600 hover:bg-rose-500 text-white px-2.5 py-1 rounded text-[11px] font-sans">Block IP</button></td>
       `;
@@ -184,7 +287,19 @@
       fetchBlocked();
     });
 
-    // 2. REST API Fetchers
+    // 2. Tab Switcher
+    function showTab(tabId) {
+      ['tab-alerts', 'tab-blocklist', 'tab-rules', 'tab-compliance', 'tab-canary'].forEach(id => {
+        document.getElementById(id).classList.add('hidden');
+        document.getElementById('btn-' + id).classList.remove('text-indigo-400', 'border-b-2', 'border-indigo-400', 'font-semibold');
+        document.getElementById('btn-' + id).classList.add('text-slate-400');
+      });
+      document.getElementById(tabId).classList.remove('hidden');
+      document.getElementById('btn-' + tabId).classList.add('text-indigo-400', 'border-b-2', 'border-indigo-400', 'font-semibold');
+      document.getElementById('btn-' + tabId).classList.remove('text-slate-400');
+    }
+
+    // 3. API Fetchers
     async function fetchStats() {
       try {
         const res = await fetch('/api/stats/overview');
@@ -203,11 +318,14 @@
         if (data.blocked_ips && data.blocked_ips.length > 0) {
           tbody.innerHTML = data.blocked_ips.map(b => `
             <tr class="hover:bg-slate-800/30">
-              <td class="p-2.5 text-rose-400 font-bold">${b.ip}</td>
-              <td class="p-2.5 text-slate-300 text-[11px]">${b.reason || 'Threshold Rule'}</td>
-              <td class="p-2.5"><button onclick="unblock('${b.id}')" class="text-slate-400 hover:text-rose-400 text-[11px]">Unblock</button></td>
+              <td class="p-3 text-rose-400 font-bold">${b.ip}</td>
+              <td class="p-3 text-slate-300 text-xs">${b.reason || 'Database Threat Rule'}</td>
+              <td class="p-3 text-slate-400 text-xs">${b.expires_at || 'Permanent'}</td>
+              <td class="p-3"><button onclick="unblock('${b.id}')" class="text-slate-400 hover:text-rose-400 text-xs">Unblock</button></td>
             </tr>
           `).join('');
+        } else {
+          tbody.innerHTML = '<tr class="text-slate-500 text-center"><td colspan="4" class="p-6">Blocklist is currently clean.</td></tr>';
         }
       } catch(e) {}
     }
@@ -220,12 +338,41 @@
         if (data.signatures && data.signatures.length > 0) {
           tbody.innerHTML = data.signatures.map(s => `
             <tr class="hover:bg-slate-800/30">
-              <td class="p-2.5 text-white font-medium">${s.name}</td>
-              <td class="p-2.5 text-slate-400 text-[11px] truncate max-w-xs">${s.pattern}</td>
-              <td class="p-2.5 font-bold text-rose-400">${s.action}</td>
+              <td class="p-3 text-white font-medium">${s.name}</td>
+              <td class="p-3 text-indigo-400">${s.protocol}</td>
+              <td class="p-3 text-slate-400 text-xs truncate max-w-xs">${s.pattern}</td>
+              <td class="p-3"><span class="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300">${s.severity}</span></td>
+              <td class="p-3 font-bold text-rose-400">${s.action}</td>
             </tr>
           `).join('');
         }
+      } catch(e) {}
+    }
+
+    async function fetchCompliance() {
+      try {
+        const res = await fetch('/api/compliance/checks');
+        const data = await res.json();
+        const tbody = document.getElementById('compliance-tbody');
+        if (data.checks && data.checks.length > 0) {
+          tbody.innerHTML = data.checks.map(c => `
+            <tr class="hover:bg-slate-800/30">
+              <td class="p-3 font-bold text-indigo-400">${c.framework}</td>
+              <td class="p-3 font-semibold text-white">${c.check_name}</td>
+              <td class="p-3 text-slate-400 text-xs">${c.description}</td>
+              <td class="p-3"><span class="px-2 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">${c.last_status || 'PASS'}</span></td>
+            </tr>
+          `).join('');
+        }
+      } catch(e) {}
+    }
+
+    async function triggerSimulate(type) {
+      try {
+        const res = await fetch('/api/simulate/' + type, {method: 'POST'});
+        const data = await res.json();
+        fetchStats();
+        fetchBlocked();
       } catch(e) {}
     }
 
@@ -233,10 +380,17 @@
       await fetch('/api/threats/blocked-ips', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ip: ip, reason: 'Manual SOC Analyst Block', duration_minutes: 60})
+        body: JSON.stringify({ip: ip, reason: 'Manual SOC Operator Block', duration_minutes: 60})
       });
       fetchBlocked();
       fetchStats();
+    }
+
+    async function addManualBlock() {
+      const ip = document.getElementById('manual-ip-input').value.trim();
+      if (!ip) return;
+      await blockManual(ip);
+      document.getElementById('manual-ip-input').value = '';
     }
 
     async function unblock(id) {
@@ -245,11 +399,18 @@
       fetchStats();
     }
 
+    async function runComplianceChecks() {
+      await fetch('/api/compliance/checks/run', {method: 'POST'});
+      fetchCompliance();
+    }
+
+    // Initial Loads
     fetchStats();
     fetchBlocked();
     fetchSignatures();
-    setInterval(fetchStats, 5000);
-    setInterval(fetchBlocked, 5000);
+    fetchCompliance();
+    setInterval(fetchStats, 4000);
+    setInterval(fetchBlocked, 4000);
   </script>
 </body>
 </html>

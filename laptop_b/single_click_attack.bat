@@ -5,7 +5,7 @@ color 0A
 
 :: Default Target IP & Port of Laptop A
 set TARGET_IP=10.30.201.26
-set TARGET_PORT=5000
+set TARGET_PORT=1234
 
 :MENU
 cls

