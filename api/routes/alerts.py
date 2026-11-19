@@ -3,9 +3,12 @@ routes/alerts.py – Alert and Incident management endpoints.
 """
 
 import logging
+import csv
+import io
+import ipaddress
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, Response
 from flask_jwt_extended import get_jwt_identity, jwt_required
 from sqlalchemy import text
 
@@ -42,7 +45,26 @@ def _execute(sql: str, params: dict | None = None):
 
 
 def _s(d: dict) -> dict:
-    return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in d.items()}
+    ip_types = (
+        ipaddress.IPv4Address,
+        ipaddress.IPv6Address,
+        ipaddress.IPv4Interface,
+        ipaddress.IPv6Interface,
+        ipaddress.IPv4Network,
+        ipaddress.IPv6Network,
+    )
+    return {
+        k: (
+            v.isoformat()
+            if isinstance(v, datetime)
+            else str(v.ip)
+            if isinstance(v, (ipaddress.IPv4Interface, ipaddress.IPv6Interface))
+            else str(v)
+            if isinstance(v, ip_types)
+            else v
+        )
+        for k, v in d.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -56,11 +78,12 @@ def list_alerts():
     severity = request.args.get("severity")
     status = request.args.get("status")
     rule_type = request.args.get("rule_type")
-    src_ip = request.args.get("src_ip")
-    date_from = request.args.get("date_from")
-    date_to = request.args.get("date_to")
+    protocol = request.args.get("protocol")
+    src_ip = request.args.get("src_ip") or request.args.get("ip")
+    date_from = request.args.get("date_from") or request.args.get("startDate")
+    date_to = request.args.get("date_to") or request.args.get("endDate")
     page = max(1, int(request.args.get("page", 1)))
-    limit = min(500, int(request.args.get("limit", 50)))
+    limit = min(500, int(request.args.get("limit", request.args.get("page_size", 50))))
     offset = (page - 1) * limit
 
     conditions, params = [], {}
@@ -71,32 +94,98 @@ def list_alerts():
         conditions.append("a.status = :status")
         params["status"] = status
     if rule_type:
-        conditions.append("r.rule_type = :rule_type")
+        conditions.append("a.rule_type = :rule_type")
         params["rule_type"] = rule_type
     if src_ip:
-        conditions.append("a.src_ip = :src_ip")
+        conditions.append("(a.src_ip = :src_ip OR a.dst_ip = :src_ip)")
         params["src_ip"] = src_ip
+    if protocol:
+        conditions.append("a.protocol = :protocol")
+        params["protocol"] = protocol
     if date_from:
         conditions.append("a.created_at >= :date_from")
         params["date_from"] = date_from
     if date_to:
-        conditions.append("a.created_at <= :date_to")
+        conditions.append("a.created_at < CAST(:date_to AS date) + INTERVAL '1 day'")
         params["date_to"] = date_to
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    count_row = _fetchone(f"SELECT COUNT(*) AS c FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id {where}", params)
-    total = count_row["c"] if count_row else 0
+    count_row = _fetchone(
+        "SELECT COUNT(*) AS total, "
+        "COUNT(*) FILTER (WHERE a.status = 'open') AS open_count, "
+        "COUNT(*) FILTER (WHERE a.status = 'acknowledged') AS acknowledged_count, "
+        "COUNT(*) FILTER (WHERE UPPER(a.severity) = 'CRITICAL') AS critical_count, "
+        "COUNT(*) FILTER (WHERE UPPER(a.severity) = 'HIGH') AS high_count "
+        f"FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id {where}",
+        params,
+    )
+    total = count_row["total"] if count_row else 0
 
     params.update({"limit": limit, "offset": offset})
     rows = _fetchall(
-        f"SELECT a.id, a.rule_id, r.name AS rule_name, r.rule_type, a.severity, "
-        f"a.src_ip, a.dst_ip, a.src_port, a.dst_port, a.protocol, a.message, "
-        f"a.status, a.assigned_to, a.created_at, a.acknowledged_at "
+        f"SELECT a.id, a.rule_id, "
+        f"COALESCE(r.name, a.packet_summary->>'rule_name', a.rule_type) AS rule_name, "
+        f"a.rule_type, a.severity, a.src_ip, a.dst_ip, a.src_port, a.dst_port, a.protocol, "
+        f"COALESCE(a.packet_summary->>'description', a.packet_summary->>'signature_name', "
+        f"a.packet_summary->>'rule_name', a.rule_type) AS description, "
+        f"a.status, a.assigned_to, a.created_at AS timestamp, a.acknowledged_at "
         f"FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id "
         f"{where} ORDER BY a.created_at DESC LIMIT :limit OFFSET :offset",
         params,
     )
-    return jsonify({"total": total, "page": page, "limit": limit, "items": [_s(r) for r in rows]})
+    return jsonify({
+        "total": total,
+        "open": count_row["open_count"] if count_row else 0,
+        "acknowledged": count_row["acknowledged_count"] if count_row else 0,
+        "critical": count_row["critical_count"] if count_row else 0,
+        "high": count_row["high_count"] if count_row else 0,
+        "page": page,
+        "limit": limit,
+        "items": [_s(r) for r in rows],
+    })
+
+
+@alerts_bp.get("/export/csv")
+@jwt_required()
+def export_alerts_csv():
+    conditions, params = [], {}
+    for field in ("severity", "status", "rule_type", "protocol"):
+        value = request.args.get(field)
+        if value:
+            conditions.append(f"a.{field} = :{field}")
+            params[field] = value
+    src_ip = request.args.get("src_ip") or request.args.get("ip")
+    if src_ip:
+        conditions.append("(a.src_ip = :src_ip OR a.dst_ip = :src_ip)")
+        params["src_ip"] = src_ip
+    date_from = request.args.get("date_from") or request.args.get("startDate")
+    date_to = request.args.get("date_to") or request.args.get("endDate")
+    if date_from:
+        conditions.append("a.created_at >= :date_from")
+        params["date_from"] = date_from
+    if date_to:
+        conditions.append("a.created_at < CAST(:date_to AS date) + INTERVAL '1 day'")
+        params["date_to"] = date_to
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    rows = _fetchall(
+        "SELECT id, created_at, severity, status, rule_type, src_ip::text AS src_ip, "
+        "dst_ip::text AS dst_ip, src_port, dst_port, protocol "
+        f"FROM alerts a {where} ORDER BY created_at DESC LIMIT 10000",
+        params,
+    )
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=list(rows[0]) if rows else [
+        "id", "created_at", "severity", "status", "rule_type",
+        "src_ip", "dst_ip", "src_port", "dst_port", "protocol",
+    ])
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(_s(row))
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=alerts.csv"},
+    )
 
 
 @alerts_bp.get("/stats")
@@ -139,7 +228,11 @@ def alert_stats():
 @jwt_required()
 def get_alert(alert_id: int):
     row = _fetchone(
-        "SELECT a.*, r.name AS rule_name, r.rule_type FROM alerts a "
+        "SELECT a.*, "
+        "COALESCE(r.name, a.packet_summary->>'rule_name', a.rule_type) AS rule_name, "
+        "COALESCE(a.packet_summary->>'description', a.packet_summary->>'signature_name', "
+        "a.packet_summary->>'rule_name', a.rule_type) AS description, "
+        "a.created_at AS timestamp FROM alerts a "
         "LEFT JOIN rules r ON r.id = a.rule_id WHERE a.id = :id",
         {"id": alert_id},
     )

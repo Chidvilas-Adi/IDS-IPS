@@ -1,0 +1,401 @@
+DATABASE-DRIVEN IDS/IPS
+PROJECT SYNOPSIS
+============================================================
+
+PROJECT TITLE
+-------------
+Database-Driven Intrusion Detection and Prevention System Using
+PostgreSQL/TimescaleDB, MongoDB, and Redis
+
+PROJECT CATEGORY
+----------------
+Database Management Systems (DBMS), Network Security, and
+Distributed Data Management
+
+
+1. ABSTRACT
+-----------
+
+This project is a database-driven prototype of an Intrusion Detection and
+Prevention System (IDS/IPS). It demonstrates how different database
+management systems can work together in one application, with each selected
+for a different kind of data and workload.
+
+PostgreSQL, deployed from the TimescaleDB distribution, is the authoritative
+relational database. It stores structured security records such as packet
+ingress metadata, detection rules, network sessions, alerts, block decisions,
+and audit information. Database triggers and functions process inserted
+packets, update related records, evaluate configured detection logic, and
+record resulting alerts and decisions.
+
+MongoDB is the document-oriented database for flexible packet summaries,
+threat-intelligence documents, and other forensic or analysis records.
+Redis is the in-memory key/value data store for short-lived correlation
+state, counters, caches, and other fast lookups. A local SQLite file is also
+present in the repository, but it is not the configured database for the
+running Docker Compose application.
+
+The central idea is not to force every kind of information into one data
+model. Instead, the project combines relational, document, and key/value
+storage and assigns each database a defined role. This makes the project a
+practical DBMS study of data modeling, database selection, transactions,
+triggers, indexing, caching, and coordination across multiple database
+systems, applied to a network-security scenario.
+
+
+2. INTRODUCTION AND BACKGROUND
+------------------------------
+
+An IDS monitors network activity for patterns that may indicate suspicious
+or unauthorized behavior. An IPS adds a prevention response, such as asking
+a host firewall to block an address. These systems must handle several
+different forms of information: structured rules and alerts, high-volume
+packet observations, flexible forensic details, and rapidly changing
+short-term counters.
+
+A single database model is not equally suitable for every one of these jobs.
+Relational tables provide constraints and relationships for authoritative
+records. Document databases can preserve records whose fields vary by
+protocol or event type. In-memory key/value stores can update and retrieve
+temporary state with low overhead.
+
+This project applies those ideas in a single prototype. Its distinguishing
+academic focus is the use of multiple DBMS types as a coordinated data
+architecture, rather than treating the database as only a place to save
+application output.
+
+
+3. PROBLEM STATEMENT
+--------------------
+
+Security monitoring produces heterogeneous data. Rules, users, sessions,
+alerts, and response actions have well-defined relationships and benefit
+from transactional consistency. Packet and forensic records may contain
+variable fields, making a rigid row format less convenient. Correlation
+operations also need short-lived state that can be read and updated quickly.
+
+Storing all these workloads in a single structure can make the design less
+appropriate for some of them. Conversely, adding multiple databases without
+clear ownership can lead to duplicated or conflicting records.
+
+The project addresses this design problem by assigning each data category
+to a suitable database and making PostgreSQL the authority for security
+decisions. MongoDB and Redis support selected workloads without becoming
+alternative sources of truth for rules, alerts, or block decisions.
+
+
+4. PROJECT AIM AND OBJECTIVES
+-----------------------------
+
+Aim:
+To design and demonstrate a database-centered IDS/IPS prototype that uses
+multiple database management system types for their complementary strengths.
+
+Objectives:
+  - Use a relational DBMS for structured, related, and authoritative
+    security data.
+  - Demonstrate database-side processing with SQL functions, triggers,
+    constraints, indexes, and transactions.
+  - Use a document DBMS for flexible packet and forensic records.
+  - Use an in-memory key/value DBMS for temporary correlation state and
+    fast lookups.
+  - Connect the databases to an API, a monitoring dashboard, and a packet
+    adapter.
+  - Explain the responsibilities, benefits, and boundaries of each database.
+  - Show how a database decision can be communicated to a separate host
+    adapter for attempted firewall enforcement.
+
+
+5. PROJECT OVERVIEW AND OPERATING IDEA
+--------------------------------------
+
+At a high level, the system follows this data flow:
+
+  Visible network packet
+       |
+       v
+  Packet adapter extracts available metadata
+       |
+       +------> PostgreSQL ingress_packets
+       |              |
+       |              v
+       |       SQL trigger and functions
+       |              |
+       |              +--> sessions and topology
+       |              +--> configured rule/signature checks
+       |              +--> alerts and database block records
+       |              +--> audit information and dashboard queries
+       |              |
+       |              v
+       |       PostgreSQL notification
+       |              |
+       |              v
+       |       Privileged host adapter requests an OS firewall action
+       |
+       +------> MongoDB raw packet / forensic document, where enabled
+       |
+       +------> Redis short-lived counters, correlation state, and caches
+
+The packet adapter supplies observations; it is not the source of the
+database's detection rules. PostgreSQL processes configured database-side
+logic when packet records are inserted. The API provides application
+endpoints and checks database connectivity. The web dashboard presents
+security information and controls. A privileged adapter listens for selected
+firewall notifications and attempts to apply an action through the host
+operating system.
+
+This separation matters: a PostgreSQL block record means a decision was
+recorded in the database; it does not, by itself, prove that the operating
+system successfully applied a firewall rule.
+
+
+6. DATABASE MANAGEMENT SYSTEMS USED
+------------------------------------
+
+A. PostgreSQL with the TimescaleDB distribution
+   Type:
+     Relational SQL database, deployed using the TimescaleDB PostgreSQL
+     distribution.
+
+   Role:
+     Primary and authoritative application database.
+
+   Example data:
+     Users and tenants; rules and DPI signatures; packet ingress records;
+     sessions; alerts; threat indicators; blocked-IP records; audit history;
+     playbooks; and compliance-related data.
+
+   Database features used:
+     Tables, relationships, constraints, indexes, SQL functions, triggers,
+     transactions, PostgreSQL notifications, and PostgreSQL-specific data
+     types such as INET for IP addresses and JSONB for selected structured
+     values. The project uses a TimescaleDB-based PostgreSQL image. This
+     synopsis does not assume that every table is configured as a Timescale
+     hypertable.
+
+   Why it fits:
+     The core security records have defined fields and relationships.
+     Relational constraints and transactions help keep related records
+     consistent. SQL makes rules and results directly inspectable, while
+     triggers allow configured processing to run in response to packet
+     inserts.
+
+   Authority:
+     PostgreSQL is the source of truth for rules, sessions, alerts, and
+     recorded block decisions.
+
+B. MongoDB
+   Type:
+     NoSQL document database using BSON documents.
+
+   Role:
+     Supporting store for flexible packet summaries and forensic or
+     analysis-oriented records.
+
+   Collections initialized by the project include:
+     raw_packets, pcap_chunks, geo_ip_cache, threat_intel_raw,
+     fingerprint_db, anomaly_vectors, session_graphs, dns_query_log,
+     http_transaction_log, tls_handshake_log, and canary_access_log.
+
+   Why it fits:
+     Different protocols and event types can have different fields.
+     Documents can keep related forensic details together without requiring
+     every record to have the same relational shape. MongoDB's document
+     model is therefore useful for exploratory lookup and forensic context.
+
+   Authority:
+     MongoDB supports investigation and analysis. It is not authoritative
+     for core IDS/IPS rules, alerts, sessions, or firewall decisions.
+     Collection definitions may exist even when their optional producers
+     are not running, so an initialized collection is not proof that it
+     currently contains live data.
+
+C. Redis
+   Type:
+     In-memory key/value data store.
+
+   Role:
+     Fast supporting store for temporary state, counters, caches, and
+     selected message-queue operations.
+
+   Example uses in the project:
+     Correlation-window state; sequence-rule progress; DNS query-rate and
+     unique-query counters; lateral-movement tracking; blocked-IP membership
+     lookups; reputation or other cached values; and API Socket.IO
+     cross-process messaging configuration.
+
+   Why it fits:
+     Correlation commonly needs repeated updates and lookups over a limited
+     time window. Redis data structures and key expiration can hold this
+     temporary state without repeatedly rewriting durable relational rows.
+
+   Authority:
+     Redis is not the durable source of truth for rules, alerts, or recorded
+     block decisions. The corresponding engine features must be running for
+     their Redis state to be generated.
+
+D. SQLite (repository file, not the active Compose application database)
+   Type:
+     Embedded relational database stored in a local file.
+
+   Role in this repository:
+     The project contains an ids_ips.db file. The current Docker Compose
+     configuration and API configuration identify PostgreSQL as the running
+     application's SQL database. Unless a specific tool or script is shown
+     opening ids_ips.db, that file should be treated as a local or legacy
+     artifact, not as the active database or a synchronized copy of the
+     PostgreSQL records.
+
+
+7. WHY MULTIPLE DATABASES ARE USED
+----------------------------------
+
+The architecture is based on purpose-specific storage:
+
+  Relational model:
+    Best suited here for records with defined columns, relationships,
+    constraints, and transactional requirements.
+
+  Document model:
+    Best suited here for records whose fields can vary with packet type,
+    protocol, or forensic source.
+
+  Key/value and in-memory model:
+    Best suited here for rapidly changing, temporary values and counters
+    that are useful during correlation but should not replace durable
+    security records.
+
+The important DBMS principle is polyglot persistence: an application can
+use more than one database technology when each database has a specific,
+understood responsibility. The project limits the risk of conflicting
+answers by defining PostgreSQL as the authority for core security decisions
+and treating the other data stores as supporting systems.
+
+
+8. DATABASE-CENTERED DETECTION AND RESPONSE
+-------------------------------------------
+
+When packet metadata is inserted into PostgreSQL, the configured ingress
+trigger and SQL functions can maintain session information, update topology
+data, inspect configured signatures, evaluate correlation logic, and create
+alerts or block records when configured conditions match. Because this work
+is associated with the database insert, a transaction can keep the insert
+and its database-side processing consistent.
+
+PostgreSQL can publish a notification for a firewall action. A separate
+privileged adapter consumes that notification and invokes operating-system
+firewall commands. This is an integration boundary between a DBMS decision
+and host-level enforcement; PostgreSQL itself does not configure the
+Windows or Linux firewall.
+
+MongoDB can preserve flexible packet and forensic documents for investigation.
+Redis can maintain temporary state used by selected engine features. The
+dashboard and API can then present durable results and supporting evidence
+through a common user-facing application.
+
+
+9. POWER, STRENGTHS, AND SIGNIFICANCE
+-------------------------------------
+
+  - Demonstrates three distinct database categories in a realistic,
+    connected application: relational SQL, document NoSQL, and in-memory
+    key/value storage.
+  - Gives each database a defined workload rather than using multiple
+    databases without a clear reason.
+  - Keeps core decisions and durable records in a relational source of
+    truth while allowing flexible supporting records and fast temporary
+    state.
+  - Uses database-side logic, not only application code, to illustrate
+    triggers, functions, transactions, and event notifications.
+  - Makes many security outcomes queryable for demonstration, inspection,
+    and academic discussion.
+  - Provides an end-to-end example connecting data capture, database
+    processing, APIs, a dashboard, and a separate firewall adapter.
+  - Offers a strong DBMS project case study for comparing schema design,
+    consistency, indexing, data lifetime, and workload suitability.
+
+
+10. UNIQUENESS OF THE PROJECT
+-----------------------------
+
+The project's distinctive feature is the role of the databases in the
+decision path. PostgreSQL is more than passive storage: configured
+triggers and SQL functions participate in processing packet records and
+producing security outcomes. MongoDB and Redis then complement that central
+relational workflow by serving different data shapes and access patterns.
+
+The project is therefore both a network-security prototype and a practical
+multi-DBMS demonstration. It makes the division of responsibility visible:
+structured truth in PostgreSQL, flexible supporting evidence in MongoDB,
+and short-lived operational state in Redis. This combination provides a
+clear foundation for discussing why database selection is an architectural
+decision.
+
+
+11. SCOPE AND LIMITATIONS
+-------------------------
+
+This project is a lab, educational, and prototype system. It is not a
+replacement for a production enterprise firewall, commercial IDS/IPS,
+endpoint protection platform, or security operations team.
+
+Packet visibility depends on the selected interface, host, operating
+system, drivers, and network path. The current packet parsing is limited;
+it does not guarantee visibility into all devices' traffic, does not capture
+all network protocols, and cannot read encrypted TLS/HTTPS contents from
+ordinary packet payloads. Simulation records are synthetic and must not be
+presented as real captured attacks.
+
+Firewall enforcement requires a separately running adapter with the
+necessary host privileges. A database health check confirms database
+connectivity at that moment; it does not prove that packet capture, every
+optional producer, every detection rule, or host-firewall enforcement is
+working.
+
+Centralizing packet processing in a relational database also creates
+trade-offs. High write volume can increase database load, trigger latency,
+index and storage growth, and the impact of a database outage. MongoDB and
+Redis availability and data freshness depend on the features that use them.
+These limitations should be considered when interpreting demonstrations
+and planning any future production-grade design.
+
+
+12. EXPECTED OUTCOME
+--------------------
+
+The expected outcome is a working educational prototype and a clear
+demonstration of how several database management systems can cooperate
+without having interchangeable responsibilities. A successful demonstration
+can show structured records and database-side processing in PostgreSQL,
+flexible document storage in MongoDB, and temporary state or cached values
+in Redis, viewed through the application's API and dashboard.
+
+The project also provides a basis for comparing database selection criteria:
+data structure, consistency needs, access speed, record lifetime, query
+patterns, operational complexity, and the consequences of failure.
+
+
+13. CONCLUSION
+--------------
+
+The Database-Driven IDS/IPS project applies DBMS concepts to a concrete
+security-monitoring scenario. PostgreSQL/TimescaleDB provides the relational
+core and authoritative decision records; MongoDB accommodates flexible
+forensic and packet-oriented documents; and Redis supports fast,
+short-lived correlation state and caches. SQLite is present as a local
+repository file, but is not configured as the active database for the
+current Docker Compose application.
+
+The project's central contribution is its deliberate division of database
+responsibilities. It demonstrates that choosing the right DBMS for each
+workload can make an application's data architecture clearer, while also
+highlighting the integration, operational, and reliability trade-offs of a
+multi-database design.
+
+
+KEYWORDS
+--------
+Database Management System (DBMS), IDS, IPS, PostgreSQL, TimescaleDB,
+MongoDB, Redis, SQLite, relational database, NoSQL, document database,
+key/value store, database trigger, SQL function, transaction, packet
+ingress, alert correlation, forensic data, polyglot persistence.

@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Network, Activity, XOctagon } from 'lucide-react';
+import { Network, XOctagon } from 'lucide-react';
 import client from '../api/client';
 import toast from 'react-hot-toast';
 
 export default function SessionInspector() {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     fetchSessions();
@@ -15,10 +16,12 @@ export default function SessionInspector() {
 
   const fetchSessions = async () => {
     try {
-      const res = await client.get('/sessions?limit=50');
+      const res = await client.get('/api/sessions?limit=50');
       setSessions(res.data.sessions || []);
+      setError('');
     } catch (e) {
-      console.error(e);
+      console.error('Failed to load sessions from PostgreSQL', e);
+      setError(e.response?.data?.error || 'Could not load sessions from PostgreSQL.');
     } finally {
       setLoading(false);
     }
@@ -26,8 +29,8 @@ export default function SessionInspector() {
 
   const killSession = async (id) => {
     try {
-      await client.delete(`/sessions/${id}`);
-      toast.success('Session killed (TCP RST dispatched)');
+      await client.delete(`/api/sessions/${id}`);
+      toast.success('Session record removed from PostgreSQL; this does not terminate the host TCP connection.');
       fetchSessions();
     } catch (e) {
       toast.error('Failed to kill session');
@@ -41,9 +44,11 @@ export default function SessionInspector() {
           <Network className="text-emerald-400" /> Active Session Inspector
         </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Stateful TCP/UDP sessions tracked in PostgreSQL and enriched in real time.
+          Stateful TCP/UDP sessions tracked in PostgreSQL. Removing a row does not terminate an operating-system connection.
         </p>
       </div>
+
+      {error && <div role="alert" className="rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-300">{error}</div>}
 
       <div className="bg-slate-900/80 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
         <table className="w-full text-left text-sm">
@@ -78,11 +83,14 @@ export default function SessionInspector() {
                     onClick={() => killSession(s.id)}
                     className="text-xs flex items-center gap-1 text-rose-400 hover:text-rose-300 font-semibold"
                   >
-                    <XOctagon size={14} /> Kill
+                    <XOctagon size={14} /> Remove record
                   </button>
                 </td>
               </tr>
             ))}
+            {sessions.length === 0 && !loading && !error && (
+              <tr><td colSpan={7} className="p-8 text-center text-slate-500">No session records in PostgreSQL yet.</td></tr>
+            )}
           </tbody>
         </table>
       </div>

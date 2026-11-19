@@ -3,10 +3,11 @@ routes/threats.py – Threat intelligence, IOC search, geo rules, and IP blockin
 """
 
 import logging
+import ipaddress
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import get_jwt_identity, jwt_required
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
@@ -23,22 +24,16 @@ def _db():
     return db
 
 
-def _clean(sql: str) -> str:
-    from app import app
-    if "sqlite" in app.config.get("SQLALCHEMY_DATABASE_URI", ""):
-        return sql.replace("::text", "").replace("ILIKE", "LIKE")
-    return sql
-
 def _fetchall(sql: str, params: dict | None = None) -> list[dict]:
     with _db().engine.connect() as conn:
-        result = conn.execute(text(_clean(sql)), params or {})
+        result = conn.execute(text(sql), params or {})
         cols = list(result.keys())
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
 def _fetchone(sql: str, params: dict | None = None) -> dict | None:
     with _db().engine.connect() as conn:
-        row = conn.execute(text(_clean(sql)), params or {}).fetchone()
-    return dict(row._mapping) if row else None
+        row = conn.execute(text(sql), params or {}).fetchone()
+        return dict(row._mapping) if row else None
 
 
 def _execute(sql: str, params: dict | None = None):
@@ -130,8 +125,8 @@ def ioc_domain_detail(domain: str):
 @jwt_required()
 def list_feeds():
     rows = _fetchall(
-        "SELECT id, name, url, feed_type, enabled, last_polled, "
-        "poll_interval_minutes, record_count FROM threat_feeds ORDER BY name"
+        "SELECT id, name, url, feed_type, enabled, last_polled_at AS last_polled, "
+        "poll_interval_minutes, ioc_count AS record_count FROM threat_feeds ORDER BY name"
     )
     return jsonify([_s(r) for r in rows])
 
@@ -241,8 +236,9 @@ def list_blocked_ips():
     total_row = _fetchone("SELECT COUNT(*) AS c FROM blocked_ips WHERE active = true")
     total = total_row["c"] if total_row else 0
     rows = _fetchall(
-        "SELECT id, ip_address, reason, blocked_at, unblocked_at, active, blocked_by "
-        "FROM blocked_ips WHERE active = true ORDER BY blocked_at DESC LIMIT :limit OFFSET :offset",
+        "SELECT id, host(ip) AS ip_address, reason, created_at AS blocked_at, "
+        "expires_at, active, created_by AS blocked_by "
+        "FROM blocked_ips WHERE active = true ORDER BY created_at DESC LIMIT :limit OFFSET :offset",
         {"limit": limit, "offset": offset},
     )
     return jsonify({"total": total, "page": page, "limit": limit, "items": [_s(r) for r in rows]})
@@ -252,26 +248,61 @@ def list_blocked_ips():
 @jwt_required()
 def block_ip():
     data = request.get_json(silent=True) or {}
-    ip = data.get("ip_address", "").strip()
+    value = data.get("ip_address")
+    if not isinstance(value, str):
+        return jsonify({"error": "ip_address must be a valid IP address"}), 400
+    ip = value.strip()
     if not ip:
         return jsonify({"error": "ip_address is required"}), 400
-    row = _fetchone(
-        "INSERT INTO blocked_ips (ip_address, reason, blocked_at, active, blocked_by) "
-        "VALUES (:ip, :reason, NOW(), true, 'manual') "
-        "ON CONFLICT (ip_address) DO UPDATE SET active = true, reason = :reason, blocked_at = NOW() "
-        "RETURNING id, blocked_at",
-        {"ip": ip, "reason": data.get("reason", "Manual block")},
+    try:
+        ip = str(ipaddress.ip_address(ip))
+    except ValueError:
+        return jsonify({"error": "ip_address must be a valid IP address"}), 400
+    try:
+        duration = int(data.get("duration_minutes", 60))
+    except (TypeError, ValueError):
+        return jsonify({"error": "duration_minutes must be a positive integer"}), 400
+    if duration < 1:
+        return jsonify({"error": "duration_minutes must be a positive integer"}), 400
+
+    reason = data.get("reason", "Manual block")
+    _execute(
+        "CALL sp_block_ip(CAST(:ip AS inet), :duration, :reason, :actor)",
+        {
+            "ip": ip, "duration": duration, "reason": reason,
+            "actor": f"user:{get_jwt_identity()}",
+        },
     )
-    return jsonify({"id": row["id"], "ip_address": ip, "blocked_at": row["blocked_at"].isoformat()}), 201
+    row = _fetchone(
+        "SELECT id, created_at FROM blocked_ips "
+        "WHERE ip = CAST(:ip AS inet) AND active = true "
+        "ORDER BY created_at DESC LIMIT 1",
+        {"ip": ip},
+    )
+    if row is None:
+        logger.error("sp_block_ip completed without an active block for %s", ip)
+        return jsonify({"error": "Database did not create an active IP block"}), 500
+    return jsonify({
+        "id": row["id"],
+        "ip_address": ip,
+        "blocked_at": row["created_at"].isoformat(),
+    }), 201
 
 
 @threats_bp.delete("/blocked-ips/<int:block_id>")
 @jwt_required()
 def unblock_ip(block_id: int):
-    result = _execute(
-        "UPDATE blocked_ips SET active = false, unblocked_at = NOW() WHERE id = :id AND active = true",
+    row = _fetchone(
+        "SELECT host(ip) AS ip_address FROM blocked_ips WHERE id = :id AND active = true",
         {"id": block_id},
     )
-    if result.rowcount == 0:
+    if row is None:
         return jsonify({"error": "Blocked IP not found or already unblocked"}), 404
+    _execute(
+        "CALL sp_unblock_ip(CAST(:ip AS inet), :actor)",
+        {
+            "ip": row["ip_address"],
+            "actor": f"user:{get_jwt_identity()}",
+        },
+    )
     return jsonify({"message": "IP unblocked"})

@@ -14,24 +14,15 @@ def _db():
     from app import db
     return db
 
-def _clean(sql: str) -> str:
-    from app import app
-    if "sqlite" in app.config.get("SQLALCHEMY_DATABASE_URI", ""):
-        return (sql.replace("::text", "")
-                   .replace("NOW() - INTERVAL '24 hours'", "datetime('now', '-24 hours')")
-                   .replace("NOW() - INTERVAL '15 minutes'", "datetime('now', '-15 minutes')")
-                   .replace("to_char(date_trunc('hour', created_at), 'YYYY-MM-DD HH24:00')", "strftime('%Y-%m-%d %H:00', created_at)"))
-    return sql
-
 def _fetchall(sql: str, params: dict = None) -> list:
     with _db().engine.connect() as conn:
-        result = conn.execute(text(_clean(sql)), params or {})
+        result = conn.execute(text(sql), params or {})
         cols = list(result.keys())
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
 def _scalar(sql: str, params: dict = None):
     with _db().engine.connect() as conn:
-        return conn.execute(text(_clean(sql)), params or {}).scalar() or 0
+        return conn.execute(text(sql), params or {}).scalar() or 0
 
 @stats_bp.route("/overview", methods=["GET"])
 @jwt_required(optional=True)
@@ -45,7 +36,7 @@ def get_overview():
         "alerts_today": total_alerts,
         "blocked_ips": blocked_count,
         "active_sessions": active_sessions,
-        "threat_score": round(float(avg_threat_score), 1) if avg_threat_score else 12.5,
+        "threat_score": round(float(avg_threat_score), 1),
         "engine_health": "UP"
     })
 

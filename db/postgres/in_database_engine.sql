@@ -13,14 +13,22 @@ CREATE TABLE IF NOT EXISTS ingress_packets (
     src_port INT,
     dst_port INT,
     protocol VARCHAR(10) NOT NULL,
-    tcp_flags VARCHAR(10) DEFAULT '',
+    tcp_flags VARCHAR(32) DEFAULT '',
     packet_length INT DEFAULT 0,
     payload_text TEXT DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+ALTER TABLE ingress_packets
+ALTER COLUMN tcp_flags TYPE VARCHAR(32);
+
 CREATE INDEX IF NOT EXISTS idx_ingress_src_time ON ingress_packets(src_ip, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ingress_dst_port ON ingress_packets(dst_port, created_at DESC);
+
+-- Non-TCP/UDP packets (for example ICMP and IGMP) have no transport ports.
+-- Take the session lock after ingress_packets to match the packet trigger.
+ALTER TABLE sessions ALTER COLUMN src_port DROP NOT NULL;
+ALTER TABLE sessions ALTER COLUMN dst_port DROP NOT NULL;
 
 -- -----------------------------------------------------------------------------
 -- 2. IN-DATABASE STORED PROCEDURE: DPI PATTERN MATCHING
@@ -69,22 +77,13 @@ BEGIN
                 'open', NOW()
             ) RETURNING id INTO v_alert_id;
 
-            -- 2. If action is BLOCK, update database blocked_ips table and notify OS
+            -- 2. Record block decisions and firewall notifications through one SQL procedure
             IF v_sig.action = 'BLOCK' THEN
-                INSERT INTO blocked_ips (tenant_id, ip, reason, alert_id, expires_at, created_by, active)
-                VALUES (
-                    1, p_src_ip, 
+                CALL sp_block_ip(
+                    p_src_ip, 120,
                     'Triggered by PL/pgSQL DPI: ' || v_sig.name || ' (' || COALESCE(v_sig.cve, 'CWE') || ')',
-                    v_alert_id, NOW() + INTERVAL '120 minutes', 'PostgreSQL_Trigger', true
+                    'PostgreSQL_Trigger', v_alert_id
                 );
-
-                -- Trigger database notification event for firewall actuators
-                PERFORM pg_notify('db_firewall_action', json_build_object(
-                    'action', 'BLOCK',
-                    'ip', p_src_ip::text,
-                    'reason', v_sig.name,
-                    'alert_id', v_alert_id
-                )::text);
             END IF;
 
             -- 3. Update reputation score directly in SQL
@@ -114,6 +113,8 @@ DECLARE
     v_distinct_port_count INT;
     v_alert_id BIGINT;
     v_is_already_blocked BOOLEAN;
+    v_ssh_rule RECORD;
+    v_port_scan_rule RECORD;
 BEGIN
     -- Check if IP is already blocked in SQL
     SELECT EXISTS(SELECT 1 FROM blocked_ips WHERE ip = p_src_ip AND active = true) INTO v_is_already_blocked;
@@ -124,30 +125,40 @@ BEGIN
     -- -------------------------------------------------------------------------
     -- Correlation Rule A: SSH Brute Force (> 5 attempts in 60s window in SQL)
     -- -------------------------------------------------------------------------
-    IF p_dst_port = 22 AND p_protocol = 'TCP' THEN
+    SELECT threshold_count, window_seconds, action, severity
+    INTO v_ssh_rule
+    FROM correlation_rules
+    WHERE name = 'SSH Brute Force Detection' AND enabled = true
+    ORDER BY id
+    LIMIT 1;
+
+    IF FOUND AND p_dst_port = 22 AND p_protocol = 'TCP' THEN
         SELECT COUNT(*) INTO v_recent_syn_count
         FROM ingress_packets
         WHERE src_ip = p_src_ip 
           AND dst_port = 22 
-          AND created_at >= NOW() - INTERVAL '60 seconds';
+          AND created_at >= NOW() - make_interval(secs => v_ssh_rule.window_seconds);
 
-        IF v_recent_syn_count >= 5 THEN
+        IF v_recent_syn_count >= v_ssh_rule.threshold_count THEN
             INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
             VALUES (
-                1, 'SQL_CORRELATION', 'HIGH', p_src_ip, '0.0.0.0'::inet, 22, 'TCP',
+                1, 'SQL_CORRELATION', v_ssh_rule.severity, p_src_ip, '0.0.0.0'::inet, 22, 'TCP',
                 json_build_object(
                     'rule_name', 'SSH Brute Force Detection',
                     'engine', 'PostgreSQL PL/pgSQL Sliding Window',
-                    'window_seconds', 60,
+                    'window_seconds', v_ssh_rule.window_seconds,
                     'calculated_count', v_recent_syn_count
                 ),
                 'open'
             ) RETURNING id INTO v_alert_id;
 
-            INSERT INTO blocked_ips (tenant_id, ip, reason, alert_id, expires_at, created_by, active)
-            VALUES (1, p_src_ip, 'In-Database SSH Brute Force Threshold Exceeded', v_alert_id, NOW() + INTERVAL '60 minutes', 'PL/pgSQL', true);
-
-            PERFORM pg_notify('db_firewall_action', json_build_object('action', 'BLOCK', 'ip', p_src_ip::text, 'reason', 'SSH Brute Force', 'alert_id', v_alert_id)::text);
+            IF UPPER(v_ssh_rule.action) = 'BLOCK' THEN
+                CALL sp_block_ip(
+                    p_src_ip, 60,
+                    'In-Database SSH Brute Force Threshold Exceeded',
+                    'PostgreSQL_Trigger', v_alert_id
+                );
+            END IF;
             RETURN;
         END IF;
     END IF;
@@ -155,28 +166,39 @@ BEGIN
     -- -------------------------------------------------------------------------
     -- Correlation Rule B: Horizontal Port Scan (> 15 distinct ports in 10s window in SQL)
     -- -------------------------------------------------------------------------
-    IF p_protocol = 'TCP' THEN
+    SELECT threshold_count, window_seconds, action, severity
+    INTO v_port_scan_rule
+    FROM correlation_rules
+    WHERE name = 'TCP Port Sweep Scan' AND enabled = true
+    ORDER BY id
+    LIMIT 1;
+
+    IF FOUND AND p_protocol = 'TCP' THEN
         SELECT COUNT(DISTINCT dst_port) INTO v_distinct_port_count
         FROM ingress_packets
         WHERE src_ip = p_src_ip 
-          AND created_at >= NOW() - INTERVAL '10 seconds';
+          AND created_at >= NOW() - make_interval(secs => v_port_scan_rule.window_seconds);
 
-        IF v_distinct_port_count >= 15 THEN
+        IF v_distinct_port_count >= v_port_scan_rule.threshold_count THEN
             INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
             VALUES (
-                1, 'SQL_CORRELATION', 'HIGH', p_src_ip, '0.0.0.0'::inet, p_dst_port, 'TCP',
+                1, 'SQL_CORRELATION', v_port_scan_rule.severity, p_src_ip, '0.0.0.0'::inet, p_dst_port, 'TCP',
                 json_build_object(
                     'rule_name', 'TCP Port Sweep Scan',
                     'engine', 'PostgreSQL DISTINCT Port Aggregation',
+                    'window_seconds', v_port_scan_rule.window_seconds,
                     'unique_ports_scanned', v_distinct_port_count
                 ),
                 'open'
             ) RETURNING id INTO v_alert_id;
 
-            INSERT INTO blocked_ips (tenant_id, ip, reason, alert_id, expires_at, created_by, active)
-            VALUES (1, p_src_ip, 'In-Database Port Sweep Scan Detected', v_alert_id, NOW() + INTERVAL '120 minutes', 'PL/pgSQL', true);
-
-            PERFORM pg_notify('db_firewall_action', json_build_object('action', 'BLOCK', 'ip', p_src_ip::text, 'reason', 'Port Sweep Scan', 'alert_id', v_alert_id)::text);
+            IF UPPER(v_port_scan_rule.action) = 'BLOCK' THEN
+                CALL sp_block_ip(
+                    p_src_ip, v_port_scan_rule.window_seconds * 12,
+                    'In-Database Port Sweep Scan Detected',
+                    'PostgreSQL_Trigger', v_alert_id
+                );
+            END IF;
             RETURN;
         END IF;
     END IF;
@@ -192,10 +214,11 @@ BEGIN
             'open'
         ) RETURNING id INTO v_alert_id;
 
-        INSERT INTO blocked_ips (tenant_id, ip, reason, alert_id, expires_at, created_by, active)
-        VALUES (1, p_src_ip, 'In-Database Threat Feed IOC Match', v_alert_id, NOW() + INTERVAL '1440 minutes', 'PL/pgSQL', true);
-
-        PERFORM pg_notify('db_firewall_action', json_build_object('action', 'BLOCK', 'ip', p_src_ip::text, 'reason', 'IOC Blacklist', 'alert_id', v_alert_id)::text);
+        CALL sp_block_ip(
+            p_src_ip, 1440,
+            'In-Database Threat Feed IOC Match',
+            'PostgreSQL_Trigger', v_alert_id
+        );
     END IF;
 END;
 $$ LANGUAGE plpgsql;
@@ -208,14 +231,33 @@ CREATE OR REPLACE FUNCTION trg_fn_process_packet_ingress()
 RETURNS TRIGGER AS $$
 BEGIN
     -- 1. In-Database Session Upsert (Stateful Tracking in SQL)
-    INSERT INTO sessions (
-        tenant_id, src_ip, dst_ip, src_port, dst_port, 
-        protocol, state, bytes_sent, packets_sent, started_at, last_seen_at
-    ) VALUES (
-        1, NEW.src_ip, NEW.dst_ip, NEW.src_port, NEW.dst_port,
-        NEW.protocol, 'ACTIVE', NEW.packet_length, 1, NOW(), NOW()
-    )
-    ON CONFLICT DO NOTHING;
+    UPDATE sessions
+    SET bytes_sent = bytes_sent + NEW.packet_length,
+        packets_sent = packets_sent + 1,
+        last_seen_at = NOW()
+    WHERE id = (
+        SELECT id
+        FROM sessions
+        WHERE src_ip = NEW.src_ip
+          AND dst_ip = NEW.dst_ip
+          AND src_port IS NOT DISTINCT FROM NEW.src_port
+          AND dst_port IS NOT DISTINCT FROM NEW.dst_port
+          AND protocol = NEW.protocol
+          AND last_seen_at >= NOW() - INTERVAL '30 seconds'
+        ORDER BY last_seen_at DESC
+        LIMIT 1
+        FOR UPDATE
+    );
+
+    IF NOT FOUND THEN
+        INSERT INTO sessions (
+            tenant_id, src_ip, dst_ip, src_port, dst_port,
+            protocol, state, bytes_sent, packets_sent, started_at, last_seen_at
+        ) VALUES (
+            1, NEW.src_ip, NEW.dst_ip, NEW.src_port, NEW.dst_port,
+            NEW.protocol, 'ACTIVE', NEW.packet_length, 1, NOW(), NOW()
+        );
+    END IF;
 
     -- 2. In-Database Network Topology Graph Edge Upsert
     INSERT INTO connection_graph_edges (tenant_id, src_ip, dst_ip, first_seen, last_seen, connection_count, total_bytes)

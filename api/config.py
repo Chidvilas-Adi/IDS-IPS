@@ -5,6 +5,21 @@ provided so the application can start without a .env file during development.
 """
 import os
 from datetime import timedelta
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from sqlalchemy.engine import URL
+
+
+def _service_url(uri: str, host_key: str, default_port: int) -> str:
+    host = os.getenv(host_key)
+    if not host:
+        return uri
+
+    parsed = urlsplit(uri)
+    credentials, separator, _ = parsed.netloc.rpartition("@")
+    auth = f"{credentials}@" if separator else ""
+    port = parsed.port or default_port
+    return urlunsplit((parsed.scheme, f"{auth}{host}:{port}", parsed.path, parsed.query, parsed.fragment))
 
 
 class Config:
@@ -26,16 +41,20 @@ class Config:
     # ── PostgreSQL / TimescaleDB ───────────────────────────────────────────
     POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
-    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "ids_ips")
-    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "ids_user")
-    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "ids_pass")
-    SQLALCHEMY_DATABASE_URI: str = os.getenv(
-        "DATABASE_URL",
-        f"postgresql+psycopg2://{os.getenv('POSTGRES_USER', 'ids_user')}:"
-        f"{os.getenv('POSTGRES_PASSWORD', 'ids_pass')}@"
-        f"{os.getenv('POSTGRES_HOST', 'localhost')}:"
-        f"{os.getenv('POSTGRES_PORT', '5432')}/"
-        f"{os.getenv('POSTGRES_DB', 'ids_ips')}",
+    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "idsips")
+    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "idsips")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "idsips_secret")
+    SQLALCHEMY_DATABASE_URI: str = _service_url(
+        os.getenv("DATABASE_URL") or URL.create(
+            "postgresql+psycopg2",
+            username=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            database=POSTGRES_DB,
+        ).render_as_string(hide_password=False),
+        "POSTGRES_HOST",
+        5432,
     )
     SQLALCHEMY_TRACK_MODIFICATIONS: bool = False
     SQLALCHEMY_ENGINE_OPTIONS: dict = {
@@ -46,11 +65,27 @@ class Config:
     }
 
     # ── MongoDB ────────────────────────────────────────────────────────────
-    MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+    MONGO_USER: str = os.getenv("MONGO_USER", "idsips")
+    MONGO_PASSWORD: str = os.getenv("MONGO_PASSWORD", "mongo_secret")
     MONGO_DB: str = os.getenv("MONGO_DB", "ids_forensics")
+    MONGO_URI: str = _service_url(
+        os.getenv("MONGO_URI") or (
+            f"mongodb://{quote(MONGO_USER, safe='')}:{quote(MONGO_PASSWORD, safe='')}"
+            f"@localhost:27017/{MONGO_DB}?authSource=admin"
+        ),
+        "MONGO_HOST",
+        27017,
+    )
 
     # ── Redis ──────────────────────────────────────────────────────────────
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "redis_secret")
+    REDIS_URL: str = _service_url(
+        os.getenv("REDIS_URL") or (
+            f"redis://:{quote(REDIS_PASSWORD, safe='')}@localhost:6379/0"
+        ),
+        "REDIS_HOST",
+        6379,
+    )
     REDIS_CHANNEL_ALERTS: str = "ids:alerts"
     REDIS_CHANNEL_STATS: str = "ids:stats"
 
@@ -98,7 +133,6 @@ class ProductionConfig(Config):
 class TestingConfig(Config):
     TESTING = True
     DEBUG = True
-    SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
 
 
 config_map = {

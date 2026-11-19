@@ -517,16 +517,18 @@ class Mutation:
 
         try:
             with db.engine.begin() as conn:
-                result = conn.execute(
-                    text(
-                        "INSERT INTO blocked_ips (ip_address, reason, blocked_at, active) "
-                        "VALUES (:ip, :reason, NOW(), true) "
-                        "ON CONFLICT (ip_address) DO UPDATE SET active = true, reason = :reason, blocked_at = NOW() "
-                        "RETURNING id"
-                    ),
+                conn.execute(
+                    text("CALL sp_block_ip(CAST(:ip AS inet), 60, :reason, 'graphql')"),
                     {"ip": ip, "reason": reason or "Manual block via GraphQL"},
                 )
-                new_id = result.scalar()
+                new_id = conn.execute(
+                    text(
+                        "SELECT id FROM blocked_ips "
+                        "WHERE ip = CAST(:ip AS inet) AND active = true "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ),
+                    {"ip": ip},
+                ).scalar_one()
             return MutationResult(success=True, message=f"IP {ip} blocked.", id=new_id)
         except Exception as exc:
             logger.error("blockIp mutation failed: %s", exc)

@@ -1,0 +1,180 @@
+DB-IDS/IPS - DATABASE TYPES AND CONNECTION SETTINGS
+==================================================
+
+This project runs three database/data services in Docker Compose. They have
+different data models and jobs. PostgreSQL is the source of truth for IDS/IPS
+decisions; MongoDB and Redis support selected workloads.
+MongoDB stores flexible forensic documents: raw packets, threat-feed records, and anomaly vectors. The API has endpoints that read these records. It supports investigation; it is not the source of truth for rules, alerts, or firewall decisions.
+Redis holds fast, temporary engine state, such as correlation-window counts, sequence progress, DNS-rate counters, and some packet-capture lookups. Expiring state helps avoid storing every short-lived counter in PostgreSQL.
+PostgreSQL remains authoritative for IDS/IPS rules, sessions, alerts, and block decisions. Some MongoDB/Redis producers are optional engine features, so their data may be empty unless those features are running
+
+
+1. POSTGRESQL / TIMESCALEDB - RELATIONAL SQL DATABASE
+----------------------------------------------------
+
+Service/container: idsips_postgres
+Compose service DNS name: postgres
+Default database: idsips
+Default internal port: 5432
+
+PostgreSQL stores structured records with defined columns, constraints,
+indexes, and relationships. In this application it stores:
+  - users and tenants
+  - detection, correlation, and DPI rules
+  - packet ingress records
+  - network sessions and topology
+  - alerts, blocked-IP state, and audit history
+  - compliance checks and results
+
+The packet-ingress trigger and SQL functions process submitted packets, update
+sessions, evaluate rules, create alerts, and record block decisions. The
+separate privileged host adapter applies firewall changes; SQL itself cannot
+configure the Windows/Linux host firewall.
+
+TimescaleDB extends PostgreSQL with time-series features. The schema may use
+PostgreSQL/TimescaleDB capabilities, but the normal connection is still the
+PostgreSQL protocol on port 5432.
+
+
+2. MONGODB - DOCUMENT / NoSQL DATABASE
+--------------------------------------
+
+Service/container: idsips_mongodb
+Compose service DNS name: mongodb
+Default internal port: 27017
+
+MongoDB stores flexible BSON documents rather than requiring every record to
+fit a fixed relational table. In this project it is used for:
+  - raw packet documents, written by the packet-capture engine
+  - raw threat-feed documents, written by the threat-feed ingester
+  - anomaly vectors produced by the ML engine
+  - DNS, HTTP, TLS, and canary/access forensic records when those producers
+    are enabled
+
+The API's Forensics and NoSQL Explorer endpoints read these MongoDB
+collections. MongoDB fits this supporting data because packet/forensic records
+can have different fields and are often retrieved as whole documents. It is
+not the authoritative store for detection rules, alerts, sessions, or
+firewall decisions; those remain in PostgreSQL. Some collection producers
+belong to optional engine features and will be empty until those features run.
+
+
+3. REDIS - IN-MEMORY KEY/VALUE STORE
+------------------------------------
+
+Service/container: idsips_redis
+Compose service DNS name: redis
+Default internal port: 6379
+
+Redis is an in-memory key/value service with persistence enabled for the
+container. In this project the engine uses it for short-lived correlation
+state: sliding-window event counts, sequence-rule progress, DNS query-rate and
+unique-query counters, and lateral-movement tracking. Expiring Redis keys let
+the engine count events across packets without repeatedly querying and
+rewriting PostgreSQL rows. Packet-capture helpers also use Redis lookups for
+blocked-IP membership and cached values. The API health check pings Redis;
+the API's Socket.IO configuration can use it as a cross-process message queue.
+
+Redis is a supporting/fast-state layer, not the durable authority for rules,
+alerts, or block decisions. PostgreSQL remains the source of truth. These
+engine functions only run when the corresponding engine feature is started;
+a healthy Redis container alone does not mean every optional feature is
+actively producing data.
+
+
+4. WHY DATABASE_URL, MONGO_URI, AND REDIS_URL CAN BE EMPTY
+---------------------------------------------------------
+
+The Compose file intentionally sets DATABASE_URL, MONGO_URI, and REDIS_URL
+to empty strings for API/engine containers. Empty does not mean disconnected:
+it tells the application not to use a single preassembled connection string.
+The application instead builds the connection from separate environment
+variables.
+
+Inside the API container, Compose supplies:
+  POSTGRES_HOST=postgres
+  POSTGRES_PORT=5432
+  POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD
+
+The API's SQLAlchemy config creates a PostgreSQL connection URL from those
+fields. The API also receives MONGO_HOST=mongodb plus MongoDB user/password/
+database fields, then builds a mongodb:// connection URI. Redis is built from
+REDIS_HOST=redis and REDIS_PASSWORD.
+
+The hostnames `postgres`, `mongodb`, and `redis` are Docker Compose DNS names.
+They work between containers on the Compose network; they are not normally
+hostnames to use directly from Windows PowerShell or another laptop.
+
+The Windows packet adapter runs directly on the host, not inside the
+Compose network. It uses POSTGRES_HOST=localhost and connects through
+PostgreSQL's loopback-only host port mapping (default 127.0.0.1:5432).
+
+Do not put real passwords in a URL in documentation or chat. Special
+characters in usernames/passwords require URL encoding; building a URL from
+separate settings avoids common parsing mistakes.
+
+
+5. ARE THEY ACTUALLY CONNECTED?
+-------------------------------
+
+The API health endpoint checks live connections to PostgreSQL, MongoDB, and
+Redis. A successful response with status UP and all three components marked
+UP confirms that the API can reach them at the moment of the check. Compose
+container status alone is not enough; an application-level health response is
+stronger evidence.
+
+From Laptop A PowerShell, check the API health response:
+
+    Invoke-RestMethod "http://127.0.0.1:1234/health"
+
+Expected shape:
+
+    status          : UP
+    database_backend: PostgreSQL
+    components      : postgres=UP, mongodb=UP, redis=UP
+
+The exact output also contains a service name and timestamp. The API's
+PostgreSQL connection is required during startup; MongoDB and Redis are
+actively pinged at API startup and checked by the health endpoint.
+
+To check container health separately:
+
+    docker compose ps
+
+To inspect service logs without displaying `.env` secrets:
+
+    docker compose logs --tail 50 api postgres mongodb redis
+
+The REST API is mapped to loopback by default at http://127.0.0.1:1234 and is
+not directly exposed to other LAN devices. Laptop B should use the HTTPS
+dashboard gateway on port 8443.
+
+
+6. SQLITE FILE IN THE REPOSITORY
+--------------------------------
+
+The repository also contains `ids_ips.db`, a local SQLite file. The current
+Docker Compose application configures PostgreSQL as its SQL database and its
+health response reports PostgreSQL. Unless a specific script explicitly opens
+`ids_ips.db`, do not treat that file as the running application's database or
+as a mirror of current PostgreSQL records.
+
+
+7. ADMIN LOGIN PASSWORD IS SEPARATE
+-----------------------------------
+
+The project-root `.env` has a clearly labeled dashboard login reminder:
+
+    ADMIN_LOGIN_USERNAME=admin
+    ADMIN_LOGIN_PASSWORD=<your current dashboard password>
+
+Keep the password private; do not copy it into chat or documentation. Compose
+passes `ADMIN_LOGIN_PASSWORD` to the schema seeder when creating the admin
+account on a fresh database. On an existing database, schema startup does
+not overwrite the current password hash, so changing the `.env` value alone
+does not reset an existing account's password. Keep this value synchronized
+with the current database password after a deliberate reset.
+
+Keep `.env` private. Do not copy passwords, database connection strings, JWT
+keys, or SMTP App Passwords into this guide, screenshots, source control, or
+chat messages.

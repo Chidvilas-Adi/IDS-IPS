@@ -39,7 +39,7 @@ const IPReputationCard = ({ ip, data, onBlock, compact = false }) => {
   const [blocking, setBlocking] = useState(false);
   const reputation = data || {};
   const score = reputation.score ?? 0;
-  const { bar, text, label } = getScoreColor(score);
+  const { text, label } = getScoreColor(score);
 
   const handleBlock = async () => {
     setBlocking(true);

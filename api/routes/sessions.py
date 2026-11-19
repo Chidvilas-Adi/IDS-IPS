@@ -14,21 +14,15 @@ def _db():
     from app import db
     return db
 
-def _clean(sql: str) -> str:
-    from app import app
-    if "sqlite" in app.config.get("SQLALCHEMY_DATABASE_URI", ""):
-        return sql.replace("::text", "").replace("ILIKE", "LIKE")
-    return sql
-
 def _fetchall(sql: str, params: dict = None) -> list:
     with _db().engine.connect() as conn:
-        result = conn.execute(text(_clean(sql)), params or {})
+        result = conn.execute(text(sql), params or {})
         cols = list(result.keys())
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
 def _fetchone(sql: str, params: dict = None) -> dict:
     with _db().engine.connect() as conn:
-        row = conn.execute(text(_clean(sql)), params or {}).fetchone()
+        row = conn.execute(text(sql), params or {}).fetchone()
         return dict(row._mapping) if row else None
 
 @sessions_bp.route("", methods=["GET"])
@@ -51,8 +45,9 @@ def list_sessions():
     rows = _fetchall(sql, params)
     for r in rows:
         for k in ["started_at", "last_seen_at"]:
-            if r.get(k):
-                r[k] = r[k].isoformat()
+            val = r.get(k)
+            if val is not None:
+                r[k] = val.isoformat() if hasattr(val, "isoformat") else str(val)
     return jsonify({"sessions": rows, "count": len(rows)})
 
 @sessions_bp.route("/<int:session_id>", methods=["GET"])
@@ -72,8 +67,10 @@ def get_session(session_id: int):
 def kill_session(session_id: int):
     sql = "DELETE FROM sessions WHERE id = :id"
     with _db().engine.begin() as conn:
-        conn.execute(text(sql), {"id": session_id})
-    return jsonify({"message": f"Session {session_id} terminated."})
+        result = conn.execute(text(sql), {"id": session_id})
+    if result.rowcount == 0:
+        return jsonify({"error": "Session record not found"}), 404
+    return jsonify({"message": f"Session record {session_id} removed from PostgreSQL."})
 
 @sessions_bp.route("/flows", methods=["GET"])
 @jwt_required(optional=True)

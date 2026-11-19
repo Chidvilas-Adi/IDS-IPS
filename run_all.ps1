@@ -1,46 +1,62 @@
-# =============================================================================
-# run_all.ps1 — Master Launcher for DB-IDS/IPS Platform on Port 1234
-# =============================================================================
+$ErrorActionPreference = "Stop"
+$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $projectRoot
 
-$ErrorActionPreference = "Continue"
-
-Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   DB-IDS/IPS ULTRA — DEDICATED CONSOLE ON PORT 1234             " -ForegroundColor Cyan
-Write-Host "=================================================================" -ForegroundColor Cyan
-
-$localIp = "10.30.201.26"
-try {
-    $ipConfig = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi*" -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
-    if ($ipConfig) { $localIp = $ipConfig }
-} catch {
-    $localIp = "10.30.201.26"
+if (-not (Test-Path ".env")) {
+    throw ".env is missing. Copy .env.example to .env and configure it first."
 }
 
-Write-Host "[*] Host Machine IP (Laptop A): " -NoNewline
-Write-Host "$localIp" -ForegroundColor Green
-Write-Host "[*] Target Console URL:         " -NoNewline
-Write-Host "http://$localIp:1234" -ForegroundColor Yellow
-Write-Host "-----------------------------------------------------------------" -ForegroundColor Cyan
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run this script as Administrator to enable packet capture and firewall actions."
+}
 
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$env:POSTGRES_HOST = "localhost"
+$env:DATABASE_URL = ""
+$env:MONGO_HOST = "localhost"
+$env:REDIS_HOST = "localhost"
+$env:API_PORT = "1234"
 
-# Start API Backend on Port 1234
-Write-Host "[1/2] Launching Dedicated UI & Flask API on Port 1234..." -ForegroundColor Green
-$env:PORT = "1234"
-$apiJob = Start-Process -FilePath "python" -ArgumentList "app.py" -WorkingDirectory "$projectRoot\api" -PassThru
+Write-Host "Starting PostgreSQL, MongoDB, and Redis..."
+docker compose up -d --wait postgres mongodb redis
+if ($LASTEXITCODE -ne 0) {
+    throw "Database services failed. Inspect them with: docker compose logs postgres mongodb redis"
+}
 
-# Start Socket Engine
-Write-Host "[2/2] Launching In-Database Socket Engine (PL/pgSQL Trigger Brain)..." -ForegroundColor Green
-$engineJob = Start-Process -FilePath "python" -ArgumentList "pure_db_socket_bridge.py" -WorkingDirectory "$projectRoot\engine" -PassThru
+Write-Host "Applying the PostgreSQL schema and migrations..."
+docker compose run --rm schema
+if ($LASTEXITCODE -ne 0) {
+    throw "PostgreSQL schema application failed."
+}
 
-# Launch Browser
-Write-Host "[+] Launching Dashboard on http://localhost:1234..." -ForegroundColor Green
-Start-Process "http://localhost:1234" -ErrorAction SilentlyContinue
+docker compose up -d --no-deps --wait api
+if ($LASTEXITCODE -ne 0) {
+    throw "API failed to start. Inspect it with: docker compose logs api"
+}
 
-Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   DEDICATED CONSOLE IS ONLINE & INTERCEPTING PACKETS!           " -ForegroundColor Green
-Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "1. Local Console:      http://localhost:1234" -ForegroundColor White
-Write-Host "2. Network Console:    http://${localIp}:1234" -ForegroundColor White
-Write-Host "3. Laptop B Folder:    $projectRoot\laptop_b\" -ForegroundColor Yellow
-Write-Host "-----------------------------------------------------------------" -ForegroundColor Cyan
+Write-Host "Building and starting the React dashboard and HTTPS gateway..."
+docker compose up -d --build --wait gui nginx
+if ($LASTEXITCODE -ne 0) {
+    throw "Dashboard or gateway failed to start. Inspect them with: docker compose logs gui nginx"
+}
+
+if (-not (Test-Path "$projectRoot\engine\.venv\Scripts\python.exe")) {
+    py -3 -m venv "$projectRoot\engine\.venv"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 3 is required to create engine\.venv."
+    }
+}
+
+$bridgePython = "$projectRoot\engine\.venv\Scripts\python.exe"
+& $bridgePython -m pip install -r "$projectRoot\engine\requirements-bridge.txt"
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install packet-adapter requirements."
+}
+
+$bridge = Start-Process -FilePath $bridgePython -ArgumentList "-u pure_db_socket_bridge.py" -WorkingDirectory "$projectRoot\engine" -PassThru
+Start-Process "https://localhost:8443"
+
+Write-Host "API container: idsips_api"
+Write-Host "Packet adapter PID: $($bridge.Id)"
+Write-Host "Dashboard: https://localhost:8443"

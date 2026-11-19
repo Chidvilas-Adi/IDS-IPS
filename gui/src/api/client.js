@@ -2,7 +2,7 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import useAuthStore from '../store/authStore';
 
-const BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const BASE_URL = process.env.REACT_APP_API_URL || '';
 
 const apiClient = axios.create({
   baseURL: BASE_URL,
@@ -116,23 +116,24 @@ export const api = {
 
   // Stats
   getStats: () => apiClient.get('/api/stats/overview'),
-  getAlertsByHour: () => apiClient.get('/api/stats/alerts-by-hour'),
+  getAlertsByHour: () => apiClient.get('/api/stats/alerts/timeseries'),
   getSeverityDistribution: () => apiClient.get('/api/stats/severity-distribution'),
   getProtocolBreakdown: () => apiClient.get('/api/stats/protocol-breakdown'),
   getTopAttackers: () => apiClient.get('/api/stats/top-attackers'),
-  getEngineHealth: () => apiClient.get('/api/stats/engine-health'),
+  getEngineHealth: () => apiClient.get('/health'),
 
   // Alerts
   getAlerts: (params) => apiClient.get('/api/alerts', { params }),
   getAlert: (id) => apiClient.get(`/api/alerts/${id}`),
-  acknowledgeAlert: (id) => apiClient.post(`/api/alerts/${id}/acknowledge`),
-  markFalsePositive: (id) => apiClient.post(`/api/alerts/${id}/false-positive`),
-  assignAlert: (id, user) => apiClient.post(`/api/alerts/${id}/assign`, { user }),
+  acknowledgeAlert: (id) => apiClient.patch(`/api/alerts/${id}/status`, { status: 'acknowledged' }),
+  markFalsePositive: (id) => apiClient.patch(`/api/alerts/${id}/status`, { status: 'false_positive' }),
+  assignAlert: (id, user) => apiClient.post(`/api/alerts/${id}/assign`, { assigned_to: user }),
   exportAlerts: (params) => apiClient.get('/api/alerts/export/csv', { params, responseType: 'blob' }),
 
   // Block IP
-  blockIP: (ip, reason) => apiClient.post('/api/firewall/block', { ip, reason }),
-  unblockIP: (ip) => apiClient.post('/api/firewall/unblock', { ip }),
+  blockIP: (ip, reason, duration_minutes = 60) =>
+    apiClient.post('/api/threats/blocked-ips', { ip_address: ip, reason, duration_minutes }),
+  unblockIP: (id) => apiClient.delete(`/api/threats/blocked-ips/${id}`),
 
   // Rules
   getRules: (type) => apiClient.get('/api/rules', { params: { type } }),

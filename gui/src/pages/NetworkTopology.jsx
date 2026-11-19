@@ -5,6 +5,7 @@ import client from '../api/client';
 export default function NetworkTopology() {
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     fetchTopology();
@@ -12,11 +13,13 @@ export default function NetworkTopology() {
 
   const fetchTopology = async () => {
     try {
-      const res = await client.get('/sessions/topology');
+      const res = await client.get('/api/sessions/topology');
       setNodes(res.data.nodes || []);
       setEdges(res.data.edges || []);
+      setError('');
     } catch (e) {
-      console.error(e);
+      console.error('Failed to load network topology from PostgreSQL', e);
+      setError(e.response?.data?.error || 'Could not load network topology from PostgreSQL.');
     }
   };
 
@@ -31,6 +34,8 @@ export default function NetworkTopology() {
         </p>
       </div>
 
+      {error && <div role="alert" className="rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-300">{error}</div>}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Nodes */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 space-y-4">
@@ -44,6 +49,9 @@ export default function NetworkTopology() {
                 <span className="text-white truncate">{n.label}</span>
               </div>
             ))}
+            {nodes.length === 0 && !error && (
+              <p className="col-span-2 p-4 text-sm text-slate-500">No network entities have been observed in PostgreSQL yet.</p>
+            )}
           </div>
         </div>
 
@@ -63,6 +71,9 @@ export default function NetworkTopology() {
                 <span className="text-slate-400">{e.count} handshakes</span>
               </div>
             ))}
+            {edges.length === 0 && !error && (
+              <p className="p-4 text-sm text-slate-500">No communication edges have been recorded in PostgreSQL yet.</p>
+            )}
           </div>
         </div>
       </div>

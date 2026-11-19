@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Globe, Search, ShieldBan, Rss, Trash2 } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Globe, Search, ShieldBan, Rss, Trash2, Plus, RefreshCw } from 'lucide-react';
 import client from '../api/client';
 import toast from 'react-hot-toast';
 
@@ -8,40 +8,71 @@ export default function ThreatIntelligence() {
   const [feeds, setFeeds] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState(null);
+  const [ipAddress, setIpAddress] = useState('');
+  const [reason, setReason] = useState('');
+  const [durationMinutes, setDurationMinutes] = useState(60);
+  const [pageError, setPageError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [bRes, fRes] = await Promise.all([
+        client.get('/api/threats/blocked-ips'),
+        client.get('/api/threats/feeds'),
+      ]);
+      setBlockedIps(bRes.data.items || []);
+      setFeeds(Array.isArray(fRes.data) ? fRes.data : []);
+      setPageError('');
+    } catch (e) {
+      console.error('Failed to load PostgreSQL threat data', e);
+      setPageError(e.response?.data?.error || 'Could not load threat data from PostgreSQL.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     fetchData();
-  }, []);
-
-  const fetchData = async () => {
-    try {
-      const bRes = await client.get('/threats/blocked-ips');
-      setBlockedIps(bRes.data.blocked_ips || []);
-      const fRes = await client.get('/threats/feeds');
-      setFeeds(fRes.data.feeds || []);
-    } catch (e) {
-      console.error(e);
-    }
-  };
+    const interval = window.setInterval(fetchData, 15000);
+    return () => window.clearInterval(interval);
+  }, [fetchData]);
 
   const handleSearch = async (e) => {
     e.preventDefault();
-    if (!searchQuery) return;
+    if (!searchQuery.trim()) return;
     try {
-      const res = await client.get(`/threats/ioc/search?q=${searchQuery}`);
+      const res = await client.get('/api/threats/ioc/search', { params: { q: searchQuery.trim() } });
       setSearchResult(res.data);
     } catch (e) {
       toast.error('Search failed');
     }
   };
 
+  const blockIp = async (e) => {
+    e.preventDefault();
+    try {
+      await client.post('/api/threats/blocked-ips', {
+        ip_address: ipAddress.trim(),
+        reason: reason.trim() || 'Manual block from Threat Intelligence',
+        duration_minutes: Number(durationMinutes),
+      });
+      toast.success(`${ipAddress.trim()} blocked in PostgreSQL`);
+      setIpAddress('');
+      setReason('');
+      await fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to block IP in PostgreSQL');
+    }
+  };
+
   const unblockIp = async (id) => {
     try {
-      await client.delete(`/threats/blocked-ips/${id}`);
-      toast.success('IP unblocked and removed from Redis hot path');
-      fetchData();
+      await client.delete(`/api/threats/blocked-ips/${id}`);
+      toast.success('IP unblocked in PostgreSQL');
+      await fetchData();
     } catch (e) {
-      toast.error('Failed to unblock IP');
+      toast.error(e.response?.data?.error || 'Failed to unblock IP');
     }
   };
 
@@ -52,9 +83,51 @@ export default function ThreatIntelligence() {
           <Globe className="text-cyan-400" /> Threat Intelligence & Blocklist
         </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Automated OSINT feeds, IOC database, and dynamic sub-millisecond Redis firewall blocklist.
+          PostgreSQL IOC feeds and active IP blocks. Database decisions are audited; host firewall enforcement requires the privileged adapter.
         </p>
       </div>
+
+      {pageError && (
+        <div role="alert" className="rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-300">
+          {pageError}
+        </div>
+      )}
+
+      <form onSubmit={blockIp} className="grid gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-5 md:grid-cols-[1fr_1fr_140px_auto]">
+        <input
+          required
+          type="text"
+          value={ipAddress}
+          onChange={(e) => setIpAddress(e.target.value)}
+          placeholder="IP address to block"
+          aria-label="IP address to block"
+          className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-white"
+        />
+        <input
+          type="text"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Reason"
+          aria-label="Block reason"
+          className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-white"
+        />
+        <label className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-400">
+          Minutes
+          <input
+            required
+            type="number"
+            min="1"
+            max="1440"
+            value={durationMinutes}
+            onChange={(e) => setDurationMinutes(e.target.value)}
+            aria-label="Block duration in minutes"
+            className="w-full bg-transparent text-sm text-white outline-none"
+          />
+        </label>
+        <button type="submit" className="inline-flex items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium hover:bg-rose-500">
+          <Plus size={16} /> Block IP
+        </button>
+      </form>
 
       {/* IOC Search */}
       <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5">
@@ -89,17 +162,27 @@ export default function ThreatIntelligence() {
             </div>
             <div className="flex-1">
               <h4 className="font-semibold text-sm text-white">{f.name}</h4>
-              <p className="text-xs text-slate-400">Total IOCs: {f.ioc_count || 0}</p>
+              <p className="text-xs text-slate-400">Records: {f.record_count ?? 0}</p>
             </div>
-            <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400">Active</span>
+            <span className={`text-xs px-2 py-0.5 rounded ${f.enabled ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-700 text-slate-400'}`}>
+              {f.enabled ? 'Enabled' : 'Disabled'}
+            </span>
           </div>
         ))}
+        {!loading && feeds.length === 0 && (
+          <p className="col-span-full rounded-lg border border-slate-800 p-4 text-sm text-slate-500">
+            No threat feeds are configured in PostgreSQL.
+          </p>
+        )}
       </div>
 
       {/* Blocked IPs Table */}
       <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 space-y-4">
         <h2 className="text-lg font-bold flex items-center gap-2">
-          <ShieldBan className="text-rose-400" /> Active Blocklist (Synchronized with Redis & Firewall)
+        <ShieldBan className="text-rose-400" /> Active PostgreSQL Blocklist
+        <button type="button" onClick={fetchData} aria-label="Refresh blocklist" className="ml-auto rounded p-2 text-slate-400 hover:bg-slate-800">
+          <RefreshCw size={15} />
+        </button>
         </h2>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
@@ -115,9 +198,9 @@ export default function ThreatIntelligence() {
             <tbody className="divide-y divide-slate-800/60">
               {blockedIps.map((b) => (
                 <tr key={b.id} className="hover:bg-slate-800/30">
-                  <td className="p-3 font-mono font-bold text-rose-400">{b.ip}</td>
+                  <td className="p-3 font-mono font-bold text-rose-400">{b.ip_address}</td>
                   <td className="p-3 text-slate-300 text-xs">{b.reason}</td>
-                  <td className="p-3 text-xs text-slate-400">{b.created_at}</td>
+                  <td className="p-3 text-xs text-slate-400">{b.blocked_at ? new Date(b.blocked_at).toLocaleString() : '—'}</td>
                   <td className="p-3 text-xs text-slate-400">{b.expires_at || 'Permanent'}</td>
                   <td className="p-3">
                     <button
@@ -129,6 +212,11 @@ export default function ThreatIntelligence() {
                   </td>
                 </tr>
               ))}
+              {!loading && blockedIps.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="p-8 text-center text-slate-500">No active IP blocks in PostgreSQL.</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

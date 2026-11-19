@@ -8,19 +8,25 @@ MongoDB connectivity.
 
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote, urlsplit, urlunsplit
 
+from dotenv import load_dotenv
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Index,
     Integer, Interval, LargeBinary, String, Text, UniqueConstraint,
     create_engine, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, INET, JSONB, UUID
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 from sqlalchemy.pool import QueuePool
 
 import redis as redis_lib
 from pymongo import MongoClient
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 # ---------------------------------------------------------------------------
 # Environment helpers
@@ -28,6 +34,18 @@ from pymongo import MongoClient
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
+
+
+def _service_url(uri: str, host_key: str, default_port: int) -> str:
+    host = _env(host_key)
+    if not host:
+        return uri
+
+    parsed = urlsplit(uri)
+    credentials, separator, _ = parsed.netloc.rpartition("@")
+    auth = f"{credentials}@" if separator else ""
+    port = parsed.port or default_port
+    return urlunsplit((parsed.scheme, f"{auth}{host}:{port}", parsed.path, parsed.query, parsed.fragment))
 
 # ---------------------------------------------------------------------------
 # Database connection setup
@@ -37,6 +55,19 @@ _PG_URL = _env(
     "POSTGRES_URL",
     "postgresql+psycopg2://ids:ids@localhost:5432/ids_ips",
 )
+
+_PG_URL = _env("POSTGRES_URL") or _env("DATABASE_URL")
+if not _PG_URL:
+    _PG_URL = URL.create(
+        "postgresql+psycopg2",
+        username=_env("POSTGRES_USER", "idsips"),
+        password=_env("POSTGRES_PASSWORD", "idsips_secret"),
+        host=_env("POSTGRES_HOST", "localhost"),
+        port=int(_env("POSTGRES_PORT", "5432")),
+        database=_env("POSTGRES_DB", "idsips"),
+    ).render_as_string(hide_password=False)
+else:
+    _PG_URL = _service_url(_PG_URL, "POSTGRES_HOST", 5432)
 
 _engine = create_engine(
     _PG_URL,
@@ -68,7 +99,14 @@ def get_redis() -> redis_lib.Redis:
     global _redis_client
     if _redis_client is None:
         _redis_client = redis_lib.Redis.from_url(
-            _env("REDIS_URL", "redis://localhost:6379/0"),
+            _service_url(
+                _env("REDIS_URL") or (
+                    f"redis://:{quote(_env('REDIS_PASSWORD', 'redis_secret'), safe='')}"
+                    "@localhost:6379/0"
+                ),
+                "REDIS_HOST",
+                6379,
+            ),
             decode_responses=True,
             socket_connect_timeout=5,
             socket_timeout=5,
@@ -87,8 +125,21 @@ def get_mongo() -> MongoClient:
     """Return a singleton MongoClient."""
     global _mongo_client
     if _mongo_client is None:
+        mongo_url = _env("MONGO_URL") or _env("MONGO_URI")
+        if not mongo_url:
+            username = quote(_env("MONGO_USER", "idsips"), safe="")
+            password = quote(_env("MONGO_PASSWORD", "mongo_secret"), safe="")
+            database = _env("MONGO_DB", "idsips")
+            mongo_url = (
+                f"mongodb://{username}:{password}@localhost:27017/{database}"
+                "?authSource=admin"
+            )
         _mongo_client = MongoClient(
-            _env("MONGO_URL", "mongodb://localhost:27017"),
+            _service_url(
+                mongo_url,
+                "MONGO_HOST",
+                27017,
+            ),
             serverSelectionTimeoutMS=5000,
         )
     return _mongo_client

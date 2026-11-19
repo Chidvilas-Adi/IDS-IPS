@@ -29,7 +29,7 @@
     </div>
     
     <div class="flex items-center gap-4 text-xs font-mono mt-2 sm:mt-0">
-      <span class="text-slate-400">HOST: <strong class="text-white">10.30.201.26:1234</strong></span>
+      <span class="text-slate-400">HOST: <strong class="text-white" id="host-label"></strong></span>
       <span class="text-slate-400">DATABASE BRAIN: <strong class="text-emerald-400">100% IN-DATABASE</strong></span>
       <a href="/api/compliance/reports/export" target="_blank" class="bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded transition text-slate-200">
         Export Audit Report
@@ -88,6 +88,9 @@
         <button onclick="triggerSimulate('canary')" class="bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-3 py-1.5 rounded-lg transition shadow">
           🍯 Test Canary Honey-Token
         </button>
+        <button onclick="triggerSimulate('benign'); showTab('tab-traffic');" class="bg-blue-600 hover:bg-blue-500 text-white font-medium px-3 py-1.5 rounded-lg transition shadow">
+          🌐 Test Web Traffic (Google/DNS)
+        </button>
       </div>
     </div>
 
@@ -95,6 +98,9 @@
     <div class="flex border-b border-slate-800 gap-6 text-sm font-medium">
       <button onclick="showTab('tab-alerts')" id="btn-tab-alerts" class="tab-btn pb-3 text-indigo-400 border-b-2 border-indigo-400 font-semibold">
         🚨 Live Threat Stream
+      </button>
+      <button onclick="showTab('tab-traffic')" id="btn-tab-traffic" class="tab-btn pb-3 text-slate-400 hover:text-slate-200">
+        🌐 Live Web Traffic & Sessions
       </button>
       <button onclick="showTab('tab-blocklist')" id="btn-tab-blocklist" class="tab-btn pb-3 text-slate-400 hover:text-slate-200">
         🛡️ Active Firewall Blocklist
@@ -141,6 +147,44 @@
             <tbody id="alerts-tbody" class="divide-y divide-slate-800/60 font-mono text-xs">
               <tr class="text-slate-500 text-center">
                 <td colspan="7" class="p-6">Listening for incoming threats... Use the buttons above or attack from Laptop B!</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 1.5: Live Network Traffic & Sessions (All Websites, Browsing, DNS) -->
+    <div id="tab-traffic" class="space-y-4 hidden">
+      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5 shadow-xl space-y-4">
+        <div class="flex justify-between items-center">
+          <div>
+            <h2 class="font-bold text-lg text-white flex items-center gap-2">
+              <span>🌐 Live Network Connections & Website Sessions</span>
+            </h2>
+            <p class="text-xs text-slate-400">Every packet across Firefox, Chrome, DNS, and LAN connections captured and logged to DB.</p>
+          </div>
+          <button onclick="fetchTraffic()" class="bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 px-3 py-1.5 rounded transition">
+            🔄 Refresh Sessions
+          </button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-slate-800 text-xs">
+              <tr>
+                <th class="p-3">Timestamp</th>
+                <th class="p-3">Source (Client)</th>
+                <th class="p-3">Target Website / Host</th>
+                <th class="p-3">Port</th>
+                <th class="p-3">Protocol</th>
+                <th class="p-3">Bytes</th>
+                <th class="p-3">Inspection Status</th>
+              </tr>
+            </thead>
+            <tbody id="traffic-tbody" class="divide-y divide-slate-800/60 font-mono text-xs">
+              <tr class="text-slate-500 text-center">
+                <td colspan="7" class="p-6">Listening for live traffic... Visit any website or run sniffer as Administrator to stream packets here!</td>
               </tr>
             </tbody>
           </table>
@@ -255,7 +299,9 @@
     // 1. WebSocket Connection to Port 1234
     const socket = io();
     const alertsTbody = document.getElementById('alerts-tbody');
+    const trafficTbody = document.getElementById('traffic-tbody');
     let hasAlerts = false;
+    let hasTraffic = false;
 
     socket.on('connect', () => {
       console.log('Connected to DB-IDS/IPS WebSocket on Port 1234!');
@@ -287,16 +333,53 @@
       fetchBlocked();
     });
 
+    socket.on('new_session', (sess) => {
+      if (!hasTraffic) {
+        trafficTbody.innerHTML = '';
+        hasTraffic = true;
+      }
+      const tr = document.createElement('tr');
+      tr.className = 'hover:bg-slate-800/40 transition';
+      tr.innerHTML = `
+        <td class="p-3 text-slate-400">${sess.time || 'Just now'}</td>
+        <td class="p-3 text-cyan-400 font-medium">${sess.src_ip}:${sess.src_port || '*'}</td>
+        <td class="p-3 text-emerald-400 font-bold">${sess.dst_ip}</td>
+        <td class="p-3 text-slate-300">${sess.dst_port || 443}</td>
+        <td class="p-3 text-indigo-400">${sess.protocol || 'TCP'}</td>
+        <td class="p-3 text-slate-400">${sess.bytes || 64} B</td>
+        <td class="p-3"><span class="px-2 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">DB Inspected</span></td>
+      `;
+      trafficTbody.prepend(tr);
+      if (trafficTbody.children.length > 50) {
+        trafficTbody.removeChild(trafficTbody.lastChild);
+      }
+    });
+
+    socket.on('stats_update', (st) => {
+      if (st.total_alerts !== undefined) document.getElementById('stat-alerts').innerText = st.total_alerts;
+      if (st.active_blocks !== undefined) document.getElementById('stat-blocked').innerText = st.active_blocks;
+      if (st.total_sessions !== undefined) document.getElementById('stat-sessions').innerText = st.total_sessions;
+    });
+
     // 2. Tab Switcher
     function showTab(tabId) {
-      ['tab-alerts', 'tab-blocklist', 'tab-rules', 'tab-compliance', 'tab-canary'].forEach(id => {
-        document.getElementById(id).classList.add('hidden');
-        document.getElementById('btn-' + id).classList.remove('text-indigo-400', 'border-b-2', 'border-indigo-400', 'font-semibold');
-        document.getElementById('btn-' + id).classList.add('text-slate-400');
+      ['tab-alerts', 'tab-traffic', 'tab-blocklist', 'tab-rules', 'tab-compliance', 'tab-canary'].forEach(id => {
+        const el = document.getElementById(id);
+        const btn = document.getElementById('btn-' + id);
+        if (el) el.classList.add('hidden');
+        if (btn) {
+          btn.classList.remove('text-indigo-400', 'border-b-2', 'border-indigo-400', 'font-semibold');
+          btn.classList.add('text-slate-400');
+        }
       });
-      document.getElementById(tabId).classList.remove('hidden');
-      document.getElementById('btn-' + tabId).classList.add('text-indigo-400', 'border-b-2', 'border-indigo-400', 'font-semibold');
-      document.getElementById('btn-' + tabId).classList.remove('text-slate-400');
+      const targetEl = document.getElementById(tabId);
+      const targetBtn = document.getElementById('btn-' + tabId);
+      if (targetEl) targetEl.classList.remove('hidden');
+      if (targetBtn) {
+        targetBtn.classList.add('text-indigo-400', 'border-b-2', 'border-indigo-400', 'font-semibold');
+        targetBtn.classList.remove('text-slate-400');
+      }
+      if (tabId === 'tab-traffic') fetchTraffic();
     }
 
     // 3. API Fetchers
@@ -404,13 +487,37 @@
       fetchCompliance();
     }
 
+    async function fetchTraffic() {
+      try {
+        const res = await fetch('/api/sessions?limit=50');
+        const data = await res.json();
+        const tbody = document.getElementById('traffic-tbody');
+        if (data.sessions && data.sessions.length > 0) {
+          hasTraffic = true;
+          tbody.innerHTML = data.sessions.map(s => `
+            <tr class="hover:bg-slate-800/40 transition">
+              <td class="p-3 text-slate-400">${s.last_seen_at || s.started_at || 'Just now'}</td>
+              <td class="p-3 text-cyan-400 font-medium">${s.src_ip}:${s.src_port || '*'}</td>
+              <td class="p-3 text-emerald-400 font-bold">${s.dst_ip}</td>
+              <td class="p-3 text-slate-300">${s.dst_port || 443}</td>
+              <td class="p-3 text-indigo-400">${s.protocol || 'TCP'}</td>
+              <td class="p-3 text-slate-400">${s.bytes_sent || 64} B</td>
+              <td class="p-3"><span class="px-2 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">DB Inspected</span></td>
+            </tr>
+          `).join('');
+        }
+      } catch(e) {}
+    }
+
     // Initial Loads
     fetchStats();
     fetchBlocked();
     fetchSignatures();
     fetchCompliance();
-    setInterval(fetchStats, 4000);
-    setInterval(fetchBlocked, 4000);
+    fetchTraffic();
+    setInterval(fetchStats, 3000);
+    setInterval(fetchBlocked, 3000);
+    setInterval(fetchTraffic, 4000);
   </script>
 </body>
 </html>

@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Bell, Filter, Download, RefreshCw, Ban, CheckCircle,
-  XCircle, UserCheck, ChevronLeft, ChevronRight, X,
-  ExternalLink, Clock, AlertTriangle, Search
+  XCircle, ChevronLeft, ChevronRight, X, ExternalLink, Search
 } from 'lucide-react';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
@@ -204,16 +203,16 @@ const AlertFeed = () => {
     }
   }, [alertQueue]);
 
-  const alerts = [...liveAlerts, ...(data?.alerts || [])];
+  const alerts = [...liveAlerts, ...(data?.items || [])];
   const totalPages = Math.ceil((data?.total || 0) / PAGE_SIZE);
 
   // Stats bar
   const metricCounts = {
     total:        data?.total || 0,
-    open:         data?.open || 0,
-    acknowledged: data?.acknowledged || 0,
-    critical:     data?.critical || 0,
-    high:         data?.high || 0,
+    open:         data?.open ?? 0,
+    acknowledged: data?.acknowledged ?? 0,
+    critical:     data?.critical ?? 0,
+    high:         data?.high ?? 0,
   };
 
   const handleExport = async () => {

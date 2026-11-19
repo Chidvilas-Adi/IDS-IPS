@@ -1,13 +1,13 @@
-import React, { useState, useEffect, useContext, createContext } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Bell, Shield, BookOpen, Globe, Monitor,
-  Search, Network, ClipboardCheck, Database, Settings,
-  ChevronLeft, ChevronRight, LogOut, User, Wifi, WifiOff,
-  AlertTriangle, X
+  Search, Network, ClipboardCheck, Settings,
+  ChevronLeft, ChevronRight, LogOut, Wifi, WifiOff
 } from 'lucide-react';
 import useAuthStore from '../store/authStore';
 import useSocket from '../hooks/useSocket';
+import client from '../api/client';
 
 const NAV_ITEMS = [
   { path: '/',           label: 'Dashboard',         icon: LayoutDashboard },
@@ -19,8 +19,7 @@ const NAV_ITEMS = [
   { path: '/forensics',  label: 'Forensics',          icon: Search },
   { path: '/topology',   label: 'Network Topology',   icon: Network },
   { path: '/compliance', label: 'Compliance',         icon: ClipboardCheck },
-  { path: '/nosql',      label: 'NoSQL Explorer',     icon: Database },
-  { path: '/settings',   label: 'Settings',           icon: Settings },
+  { path: '/settings',   label: 'System Status',      icon: Settings },
 ];
 
 const EngineStatusDot = ({ status }) => {
@@ -40,11 +39,38 @@ const Sidebar = ({ collapsed, onToggle }) => {
   const navigate = useNavigate();
   const logout = useAuthStore((s) => s.logout);
   const user = useAuthStore((s) => s.user);
-  const { connected, alertCount, clearAlertCount, engineStatus } = useSocket();
+  const { connected, alertCount, clearAlertCount } = useSocket();
+  const [engineStatus, setEngineStatus] = useState(null);
 
-  const allEnginesRunning = Object.values(engineStatus).every((s) => s === 'running');
-  const anyEngineStopped = Object.values(engineStatus).some((s) => s === 'stopped');
-  const overallStatus = anyEngineStopped ? 'stopped' : allEnginesRunning ? 'running' : 'warning';
+  useEffect(() => {
+    let active = true;
+    const fetchHealth = async () => {
+      try {
+        const { data } = await client.get('/health');
+        if (active) setEngineStatus(data.components || {});
+      } catch (error) {
+        console.error('Failed to load service health for sidebar', error);
+        if (active) setEngineStatus({});
+      }
+    };
+    fetchHealth();
+    const interval = window.setInterval(fetchHealth, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const engineStates = Object.values(engineStatus || {});
+  const overallStatus = engineStatus === null
+    ? 'unknown'
+    : engineStates.length === 0
+      ? 'unknown'
+      : engineStates.every((status) => status === 'UP')
+        ? 'running'
+        : engineStates.some((status) => status === 'DOWN')
+          ? 'stopped'
+          : 'warning';
 
   const handleLogout = () => {
     logout();
@@ -151,7 +177,8 @@ const Sidebar = ({ collapsed, onToggle }) => {
           {!collapsed && (
             <span className="text-xs text-slate-500">
               {overallStatus === 'running' ? 'All engines running' :
-               overallStatus === 'warning' ? 'Engine warning' : 'Engine offline'}
+               overallStatus === 'warning' ? 'Engine warning' :
+               overallStatus === 'unknown' ? 'Health unavailable' : 'Engine offline'}
             </span>
           )}
         </div>
@@ -160,7 +187,7 @@ const Sidebar = ({ collapsed, onToggle }) => {
         <div className={`flex items-center px-4 py-3 border-t border-slate-800 ${collapsed ? 'justify-center' : 'gap-3'}`}>
           {!collapsed && (
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-slate-200 truncate">{user?.username || 'Admin'}</div>
+              <div className="text-sm font-medium text-slate-200 truncate">{user?.full_name || user?.username || 'Admin'}</div>
               <div className="text-xs text-slate-500 truncate">{user?.role || 'Analyst'}</div>
             </div>
           )}

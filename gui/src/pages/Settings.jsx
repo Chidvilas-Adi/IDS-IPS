@@ -1,41 +1,88 @@
-import React from 'react';
-import { Settings as SettingsIcon, Sliders, Database, HardDrive, Key } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Database, RefreshCw, Server } from 'lucide-react';
+import client from '../api/client';
 
 export default function Settings() {
+  const [health, setHealth] = useState(null);
+  const [error, setError] = useState('');
+  const [updatedAt, setUpdatedAt] = useState(null);
+
+  const fetchHealth = useCallback(async () => {
+    try {
+      const { data } = await client.get('/health');
+      setHealth(data);
+      setError('');
+      setUpdatedAt(new Date());
+    } catch (e) {
+      console.error('Failed to load service health', e);
+      setError(e.response?.data?.error || 'Could not load service health.');
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchHealth();
+    const interval = window.setInterval(fetchHealth, 15000);
+    return () => window.clearInterval(interval);
+  }, [fetchHealth]);
+
   return (
-    <div className="p-6 space-y-6 text-slate-100 max-w-4xl">
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <SettingsIcon className="text-slate-400" /> Platform Configuration
-        </h1>
-        <p className="text-sm text-slate-400 mt-1">
-          Dynamic engine parameters and runtime database connection topology.
-        </p>
+    <div className="max-w-4xl space-y-6 p-6 text-slate-100">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="flex items-center gap-2 text-2xl font-bold">
+            <Server className="text-slate-300" /> System Status
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Live service state reported by the API, refreshed every 15 seconds.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={fetchHealth}
+          aria-label="Refresh system health"
+          className="rounded-lg border border-slate-700 p-2 text-slate-300 hover:bg-slate-800"
+        >
+          <RefreshCw size={16} />
+        </button>
       </div>
 
-      <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-5 space-y-4">
-        <h3 className="font-bold text-lg text-white flex items-center gap-2">
-          <Database size={18} className="text-indigo-400" /> Database-Driven Architecture State
-        </h3>
-        <div className="grid grid-cols-2 gap-4 text-xs font-mono">
-          <div className="p-3 bg-slate-950 rounded border border-slate-800">
-            <span className="text-slate-400 block mb-1">Relational Master</span>
-            <span className="text-white font-bold">PostgreSQL 16 / TimescaleDB (Port 5432)</span>
-          </div>
-          <div className="p-3 bg-slate-950 rounded border border-slate-800">
-            <span className="text-slate-400 block mb-1">NoSQL Buffer</span>
-            <span className="text-white font-bold">MongoDB 7.0 (Port 27017)</span>
-          </div>
-          <div className="p-3 bg-slate-950 rounded border border-slate-800">
-            <span className="text-slate-400 block mb-1">Hot-Path Cache</span>
-            <span className="text-white font-bold">Redis 7.0 (Port 6379, O(1) Blocklist)</span>
-          </div>
-          <div className="p-3 bg-slate-950 rounded border border-slate-800">
-            <span className="text-slate-400 block mb-1">Network Sniffer</span>
-            <span className="text-white font-bold">Scapy Raw Socket / AF_PACKET</span>
-          </div>
+      {error && (
+        <div role="alert" className="rounded-lg border border-red-800 bg-red-950/40 p-3 text-sm text-red-300">
+          {error}
         </div>
-      </div>
+      )}
+
+      <section className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/80 p-5">
+        <h2 className="flex items-center gap-2 text-lg font-bold text-white">
+          <Database size={18} className="text-indigo-400" /> PostgreSQL-Centric Detection
+        </h2>
+        <p className="text-sm text-slate-300">
+          PostgreSQL stores packet ingress, detection rules, alerts, sessions, blocked-IP state, compliance results, and audit records.
+          SQL triggers and procedures make detection and block decisions.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {health?.components && Object.entries(health.components).map(([name, status]) => (
+            <div key={name} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 p-3">
+              <span className="text-sm capitalize text-slate-300">{name}</span>
+              <span className={`text-xs font-semibold ${status === 'UP' ? 'text-emerald-400' : 'text-red-400'}`}>
+                {status}
+              </span>
+            </div>
+          ))}
+          {!health?.components && !error && (
+            <p className="text-sm text-slate-500">Waiting for the API health response…</p>
+          )}
+        </div>
+        {updatedAt && <p className="text-xs text-slate-500">Last checked {updatedAt.toLocaleTimeString()}</p>}
+      </section>
+
+      <section className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-5">
+        <h2 className="text-sm font-bold text-amber-200">Host enforcement is separate</h2>
+        <p className="mt-2 text-sm text-amber-100/80">
+          The API health check does not prove packet capture or Windows Firewall enforcement is running.
+          Those require the elevated host adapter; verify its capture count in Forensics and test blocks from another device.
+        </p>
+      </section>
     </div>
   );
 }

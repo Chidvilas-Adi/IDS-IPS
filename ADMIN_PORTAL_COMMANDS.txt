@@ -1,0 +1,128 @@
+DB-IDS/IPS - ADMIN PORTAL AND API COMMANDS
+==========================================
+
+Run Docker Compose commands from the project/repository folder on Laptop A.
+Do not paste passwords, JWT tokens, or .env contents into chat or screenshots.
+
+
+1. OPEN THE ADMIN DASHBOARD
+---------------------------
+
+On Laptop A:
+
+    Start-Process "https://localhost:8443"
+
+On Laptop B, use Laptop A's CURRENT LAN IPv4 address:
+
+    https://<LAPTOP_A_CURRENT_IP>:8443
+
+For example, 10.17.31.79 was Laptop A's address in a previous check; it may
+have changed. Confirm using `ipconfig` on Laptop A. Sign in through the page
+with the configured dashboard username/password. Do not assume a password
+from an old message is still valid. The local self-signed certificate can
+cause a browser warning in this isolated lab.
+
+The dashboard is the normal interface for viewing alerts, traffic/sessions,
+rules, topology, and system status.
+
+
+2. CHECK COMPOSE SERVICES (LAPTOP A, POWERSHELL)
+------------------------------------------------
+
+    docker compose ps
+
+Check recent API logs:
+
+    docker compose logs --tail 100 api
+
+Check API readiness locally:
+
+    Invoke-RestMethod "http://127.0.0.1:1234/health"
+
+The API host port is loopback-only by default. Use the HTTPS dashboard on
+port 8443 from Laptop B rather than trying to connect to Laptop A's port 1234.
+If API_PORT was changed in .env, substitute that configured port.
+
+
+3. OPTIONAL: LIST ALERTS AND RULES THROUGH THE AUTHENTICATED API
+-----------------------------------------------------------------
+
+These commands are for PowerShell on Laptop A. The API port 1234 is bound to
+Laptop A's loopback interface by default. The login password is read with a
+hidden secure prompt. The API request must briefly represent it in process
+memory; do not enable PowerShell transcripts while doing this.
+
+    $baseUrl = "http://127.0.0.1:1234"
+    $username = Read-Host "Dashboard username"
+    $securePassword = Read-Host "Dashboard password" -AsSecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+    try {
+        $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+        $body = @{ username = $username; password = $plainPassword } | ConvertTo-Json
+        $login = Invoke-RestMethod -Method Post `
+            -Uri "$baseUrl/api/auth/login" `
+            -ContentType "application/json" -Body $body
+    }
+    finally {
+        if ($pointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+        }
+        $plainPassword = $null
+        $body = $null
+        $securePassword.Dispose()
+    }
+    $token = $login.access_token
+    $headers = @{ Authorization = "Bearer $token" }
+
+List the latest alerts:
+
+    $alerts = Invoke-RestMethod -Headers $headers `
+        -Uri "$baseUrl/api/alerts?limit=20"
+    $alerts.items | Format-Table id, timestamp, severity, status, rule_type, src_ip, dst_ip
+
+List rules:
+
+    $rules = Invoke-RestMethod -Headers $headers `
+        -Uri "$baseUrl/api/rules?limit=100"
+    $rules.items | Format-Table id, name, rule_type, severity, action, enabled
+
+Filter alerts involving a particular IP:
+
+    $observedIp = Read-Host "IP address to search for"
+    $encodedIp = [uri]::EscapeDataString($observedIp)
+    $matchingAlerts = Invoke-RestMethod -Headers $headers `
+        -Uri "$baseUrl/api/alerts?ip=$encodedIp&limit=100"
+    $matchingAlerts.items | Format-Table id, timestamp, severity, status, src_ip, dst_ip, rule_type
+
+Mark one alert acknowledged (replace 123 with its actual alert ID):
+
+    $alertId = 123
+    Invoke-RestMethod -Method Patch -Headers $headers `
+        -Uri "$baseUrl/api/alerts/$alertId/status" `
+        -ContentType "application/json" `
+        -Body (@{ status = "acknowledged" } | ConvertTo-Json)
+
+The API accepts alert status values: open, acknowledged, investigating,
+resolved, and false_positive. Check the alert ID and intended status before
+running a change command.
+
+When finished, clear the token from the current PowerShell session:
+
+    $token = $null
+    $headers = $null
+    $login = $null
+
+
+4. APPLY CONFIGURATION CHANGES
+------------------------------
+
+After editing local .env settings such as SMTP, recreate only the API service:
+
+    docker compose up -d --force-recreate api
+
+Check its logs:
+
+    docker compose logs --tail 100 api
+
+Do not print or share the .env file. Use a valid Gmail App Password in
+SMTP_PASSWORD; never use the regular Google account password for SMTP.

@@ -10,10 +10,10 @@ import SessionInspector from './pages/SessionInspector';
 import Forensics from './pages/Forensics';
 import NetworkTopology from './pages/NetworkTopology';
 import Compliance from './pages/Compliance';
-import NoSQLExplorer from './pages/NoSQLExplorer';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import useAuthStore from './store/authStore';
+import apiClient from './api/client';
 
 // Protected route wrapper
 const ProtectedRoute = ({ children }) => {
@@ -30,6 +30,13 @@ const ProtectedRoute = ({ children }) => {
 // Layout wrapper with sidebar
 const AppLayout = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
+  const updateUser = useAuthStore((s) => s.updateUser);
+
+  useEffect(() => {
+    apiClient.get('/api/auth/me')
+      .then(({ data }) => updateUser(data))
+      .catch((error) => console.error('Failed to load the signed-in user profile', error));
+  }, [updateUser]);
 
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden">
@@ -121,14 +128,6 @@ const App = () => {
         element={
           <ProtectedRoute>
             <AppLayout><Compliance /></AppLayout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/nosql"
-        element={
-          <ProtectedRoute>
-            <AppLayout><NoSQLExplorer /></AppLayout>
           </ProtectedRoute>
         }
       />

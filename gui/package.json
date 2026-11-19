@@ -31,6 +31,10 @@
     "@apollo/client": "^3.9.1",
     "graphql": "^16.8.1"
   },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-keywords": "5.1.0"
+  },
   "browserslist": {
     "production": [
       ">0.2%",

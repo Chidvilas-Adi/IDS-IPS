@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ============================================================
 #  Database-Driven IDS/IPS  –  Docker Compose
 # ============================================================
@@ -24,22 +22,44 @@ services:
     container_name: idsips_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: idsips
-      POSTGRES_USER: idsips
-      POSTGRES_PASSWORD: idsips_secret
+      POSTGRES_DB: ${POSTGRES_DB:-idsips}
+      POSTGRES_USER: ${POSTGRES_USER:-idsips}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-idsips_secret}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - idsips_net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U idsips -d idsips"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # Apply the idempotent schema on every startup, including existing volumes.
+  schema:
+    image: timescale/timescaledb:latest-pg16
+    restart: "no"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-idsips}
+      POSTGRES_USER: ${POSTGRES_USER:-idsips}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-idsips_secret}
+      INITIAL_ADMIN_PASSWORD: ${ADMIN_LOGIN_PASSWORD:?Set ADMIN_LOGIN_PASSWORD in .env}
+      INITIAL_ADMIN_NAME: ${INITIAL_ADMIN_NAME:?Set INITIAL_ADMIN_NAME in .env}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:?Set INITIAL_ADMIN_EMAIL in .env}
+    command:
+      - sh
+      - -c
+      - until pg_isready -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"; do sleep 2; done; PGPASSWORD="$$POSTGRES_PASSWORD" psql -1 -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -v ON_ERROR_STOP=1 -v admin_password="$$INITIAL_ADMIN_PASSWORD" -v admin_name="$$INITIAL_ADMIN_NAME" -v admin_email="$$INITIAL_ADMIN_EMAIL" -f /migrations/init.sql
+    volumes:
+      - ./db/postgres/init.sql:/migrations/init.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - idsips_net
 
   # ----------------------------------------------------------
   # MongoDB 7
@@ -49,11 +69,9 @@ services:
     container_name: idsips_mongodb
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: idsips
-      MONGO_INITDB_ROOT_PASSWORD: mongo_secret
-      MONGO_INITDB_DATABASE: idsips
-    ports:
-      - "27017:27017"
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-idsips}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-mongo_secret}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-idsips}
     volumes:
       - mongo_data:/data/db
       - ./db/mongo/init.js:/docker-entrypoint-initdb.d/init.js:ro
@@ -73,15 +91,15 @@ services:
     image: redis:7-alpine
     container_name: idsips_redis
     restart: unless-stopped
-    command: redis-server --requirepass redis_secret --appendonly yes
-    ports:
-      - "6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_secret}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
     volumes:
       - redis_data:/data
     networks:
       - idsips_net
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "redis_secret", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -91,23 +109,26 @@ services:
   # Detection / Prevention Engine
   # ----------------------------------------------------------
   engine:
+    profiles: ["linux-capture"]
     build:
       context: ./engine
       dockerfile: Dockerfile
     container_name: idsips_engine
     restart: unless-stopped
+    command: ["python", "pure_db_socket_bridge.py"]
     network_mode: host          # Required for raw packet capture
     depends_on:
-      postgres:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    env_file:
-      - .env
+      schema:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-idsips}
+      POSTGRES_USER: ${POSTGRES_USER:-idsips}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      DATABASE_URL: ""
+      NETWORK_INTERFACE: ${NETWORK_INTERFACE:-eth0}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./engine:/app
     cap_add:
       - NET_RAW
@@ -117,6 +138,7 @@ services:
   # Threat Feed Ingester (same image, different entrypoint)
   # ----------------------------------------------------------
   threat_feed_ingester:
+    profiles: ["threat-intel"]
     build:
       context: ./engine
       dockerfile: Dockerfile
@@ -124,12 +146,25 @@ services:
     restart: unless-stopped
     command: python threat_feed_ingester.py
     depends_on:
-      postgres:
-        condition: service_healthy
+      schema:
+        condition: service_completed_successfully
       mongodb:
         condition: service_healthy
-    env_file:
-      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-idsips}
+      POSTGRES_USER: ${POSTGRES_USER:-idsips}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      DATABASE_URL: ""
+      MONGO_HOST: mongodb
+      MONGO_USER: ${MONGO_USER:-idsips}
+      MONGO_PASSWORD: ${MONGO_PASSWORD:?Set MONGO_PASSWORD in .env}
+      MONGO_DB: ${MONGO_DB:-idsips}
+      MONGO_URI: ""
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      REDIS_URL: ""
     volumes:
       - ./engine:/app
     networks:
@@ -145,22 +180,47 @@ services:
     container_name: idsips_api
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "127.0.0.1:${API_PORT:-1234}:5000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      schema:
+        condition: service_completed_successfully
       mongodb:
         condition: service_healthy
       redis:
         condition: service_healthy
-    env_file:
-      - .env
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      DEBUG: ${DEBUG:-false}
+      TESTING: ${TESTING:-false}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-idsips}
+      POSTGRES_USER: ${POSTGRES_USER:-idsips}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      DATABASE_URL: ""
+      MONGO_HOST: mongodb
+      MONGO_USER: ${MONGO_USER:-idsips}
+      MONGO_PASSWORD: ${MONGO_PASSWORD:?Set MONGO_PASSWORD in .env}
+      MONGO_DB: ${MONGO_DB:-idsips}
+      MONGO_URI: ""
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      REDIS_URL: ""
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://localhost:8443}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      PORT: 5000
     volumes:
       - ./api:/app
     networks:
       - idsips_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5000/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -175,29 +235,48 @@ services:
       dockerfile: Dockerfile
     container_name: idsips_gui
     restart: unless-stopped
-    ports:
-      - "3000:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       - idsips_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # ----------------------------------------------------------
   # NGINX reverse proxy (HTTP → HTTPS, SSL termination)
   # ----------------------------------------------------------
   nginx:
-    image: nginx:alpine
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
     container_name: idsips_nginx
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "${WEB_PORT:-8080}:80"
+      - "${TLS_PORT:-8443}:443"
     depends_on:
-      - api
-      - gui
+      api:
+        condition: service_healthy
+      gui:
+        condition: service_healthy
+    environment:
+      TLS_PUBLIC_PORT: ${TLS_PORT:-8443}
+      TLS_DNS_NAME: ${TLS_DNS_NAME:-localhost}
+      TLS_IP_ADDRESS: ${TLS_IP_ADDRESS:-127.0.0.1}
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
+      - ./nginx/ssl:/etc/nginx/ssl
       - nginx_logs:/var/log/nginx
     networks:
       - idsips_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fk https://127.0.0.1/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

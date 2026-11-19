@@ -1,0 +1,105 @@
+DB-IDS/IPS - WHICH IP ADDRESS MEANS WHAT?
+=========================================
+
+This guide explains IPs shown in packet captures, sessions, alerts, and the
+Laptop B simulation. IPs observed previously are examples from that lab
+network; they can change when devices reconnect or the hotspot renews leases.
+
+
+1. HOW TO READ AN IP IN THE APP
+-------------------------------
+
+src_ip = source/sender address seen by the capture adapter.
+dst_ip = destination/receiver address seen by the capture adapter.
+
+An entry such as 10.1.2.3:5353 means IP 10.1.2.3 using port 5353. The port is
+a service/transport endpoint, not another IP address.
+
+On an outbound connection, a laptop is often the source and a server is the
+destination. For a response packet, those roles reverse. NAT, VPNs, proxies,
+Docker networking, and which interface is captured can change which endpoint
+addresses the sensor sees. An IP alone does not prove a person's identity or
+which physical device owns it.
+
+
+2. ADDRESSES FROM THE PREVIOUS LAB CHECK
+----------------------------------------
+
+10.17.31.79
+  Laptop A's Wi-Fi IPv4 address at the time checked. Laptop A ran the
+  database/API/dashboard and packet adapter. Verify it again with ipconfig;
+  DHCP/hotspot addresses can change.
+
+10.17.31.137
+  Laptop B's IPv4 address at the time checked. Verify on Laptop B before using
+  it in a query.
+
+10.17.31.83
+  The default gateway/hotspot gateway shown at the time checked. This is the
+  router/phone gateway address, not necessarily Laptop A or Laptop B. Verify
+  with ipconfig on Windows or `ip route` on Linux.
+
+224.0.0.251:5353
+  IPv4 multicast group for mDNS (multicast DNS), normally UDP port 5353.
+  Devices on the local link use this group for local name/service discovery.
+  It is not a unicast IP assigned to your mobile phone, and it does not
+  identify one device. The /32 suffix means one IPv4 address in CIDR notation;
+  it does not mean this multicast group is a gateway.
+
+127.0.0.1
+  Loopback: this computer talking to itself. It is not a LAN address.
+
+0.0.0.0
+  Unspecified/wildcard address used in some rules or records. It does not
+  identify a remote device.
+
+
+3. SIMULATED IP ADDRESSES
+-------------------------
+
+198.51.100.0/24 and 192.0.2.0/24 are reserved documentation/example ranges.
+Laptop B's synthetic scenarios use addresses such as 198.51.100.189 and
+192.0.2.10. These are test values, not the real source device, attacker, or
+destination on your network. A simulation inserts synthetic events into the
+application/database; it does not transmit those attack packets.
+
+
+4. HOW TO IDENTIFY YOUR CURRENT DEVICES
+---------------------------------------
+
+On Windows Laptop A, open PowerShell or Command Prompt and run:
+
+    ipconfig
+
+Find the active Wi-Fi/Ethernet adapter:
+  IPv4 Address       = Laptop A's address on that network
+  Default Gateway    = router/hotspot gateway
+
+On Arch Linux Laptop B, run:
+
+    ip -brief address
+    ip route
+
+The `src_ip` and `dst_ip` columns in packet/session/alert queries show the
+addresses recorded by the sensor. Compare them with each computer's current
+network configuration. For definitive device ownership, also check the
+hotspot/router's connected-client or DHCP lease list.
+
+
+5. IMPORTANT CAPTURE LIMITS
+---------------------------
+
+The sensor only records traffic delivered to the interface it captures. It
+does not automatically see every device on a switched network. Wi-Fi drivers,
+VPNs, Docker forwarding, NAT, multicast, and interface selection can affect
+what appears. A successful Laptop B HTTPS connection to Laptop A does not by
+itself prove the packet adapter captured that connection.
+
+TLS/HTTPS payload contents are encrypted; the sensor may see network
+endpoints/metadata but not readable HTTPS page contents.
+
+For current database commands that show observed IPs, see:
+  DATABASE_IP_AND_RULE_QUERIES.txt
+
+For dashboard/API administration commands, see:
+  ADMIN_PORTAL_COMMANDS.txt

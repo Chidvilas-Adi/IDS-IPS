@@ -1,0 +1,319 @@
+DB-IDS/IPS PROJECT OVERVIEW
+==========================
+
+Purpose
+-------
+This project is a database-driven network intrusion detection and prevention
+prototype. It captures packets visible to a host adapter, submits packet
+metadata and payload bytes to PostgreSQL, evaluates configured detection logic
+in the database, stores resulting sessions and alerts, and can ask a privileged
+host adapter to apply firewall block or unblock actions.
+
+It is a lab, learning, and prototype system. It is not a replacement for a
+production enterprise firewall, commercial IDS/IPS, endpoint protection, or a
+security operations team. A successful health check means the dashboard/API
+and its dependencies responded; it does not certify every detection rule,
+firewall action, capture path, or user-interface page.
+
+
+What is in the project
+----------------------
+
+1. Packet adapter
+   File: engine/pure_db_socket_bridge.py
+
+   The adapter captures packets and submits them to the PostgreSQL
+   ingress_packets table. It parses IPv4 headers and TCP/UDP ports, captures
+   TCP flags, and extracts packet payload bytes/text where available. Packet
+   classification and correlation decisions are intended to happen in
+   PostgreSQL, not in this adapter.
+
+   The adapter also listens for PostgreSQL notifications on
+   db_firewall_action. It validates host addresses and invokes operating-system
+   firewall commands. It needs elevated privileges to capture packets and
+   change host firewall rules.
+
+   Windows uses Winsock raw IPv4 sockets (IPPROTO_IP with SIO_RCVALL). This is
+   host-level IPv4 capture, not full Ethernet/Wireshark capture; it does not
+   capture IPv6 and can miss traffic depending on Windows/Wi-Fi/driver/network
+   paths. The optional UDP test listener uses port 9999; an "address already
+   in use" warning means another listener may already own that port.
+
+   Linux capture uses an AF_PACKET socket bound to NETWORK_INTERFACE and
+   requires suitable raw-socket privileges. A switched Wi-Fi/LAN does not
+   automatically expose every other device's traffic to the sensor. The
+   sensor sees traffic delivered to its host/interface, or traffic routed or
+   mirrored to it. TLS/HTTPS payloads are encrypted and are not readable by
+   this packet parser.
+
+2. PostgreSQL / TimescaleDB
+   Files: db/postgres/init.sql, db/postgres/in_database_engine.sql,
+          db/postgres/in_database_views_and_procs.sql
+
+   PostgreSQL is the source of truth for the detection path. Its schema
+   includes packet ingress, sessions, alerts, rules/signatures, threat
+   indicators, block records, audit data, playbooks, and dashboard queries.
+   The packet-ingress trigger performs the database-side work when a packet is
+   inserted:
+
+     - maintain or create a session;
+     - update a source/destination topology edge;
+     - inspect configured DPI signatures;
+     - evaluate configured correlation logic;
+     - create alerts and update reputation/block records when rules match.
+
+   Stored procedures such as sp_block_ip and sp_unblock_ip manage the database
+   block list and audit records. PostgreSQL NOTIFY publishes firewall actions
+   for the adapter. The database decision and operating-system enforcement
+   are separate: a block row alone is not proof that the host firewall rule
+   was successfully applied.
+
+   Non-TCP/UDP packets have no transport ports. Session port columns therefore
+   need to allow NULL. The packet adapter can report all TCP flags together,
+   so tcp_flags must be wide enough for combined flag names. The current schema
+   updates include these compatibility fixes and integration-test assertions.
+
+3. API
+   Files: api/app.py, api/config.py, api/routes/
+
+   Flask provides REST endpoints for authentication and project data, plus a
+   Socket.IO connection for live dashboard updates. Login returns JWT tokens.
+   The synthetic simulation endpoint (/api/simulate/<scenario>) is protected
+   by JWT authentication.
+
+   The API depends on PostgreSQL, MongoDB, and Redis in the current Compose
+   setup. Its /health response reports dependency readiness. Treat that as a
+   dependency check, not as proof that capture or firewall enforcement works.
+
+4. Dashboard
+   Directory: gui/
+
+   The React interface includes dashboard, alerts, rules, playbooks, threat
+   intelligence, sessions, forensics, topology, compliance, and settings
+   pages. The UI communicates with the API over HTTPS and Socket.IO through
+   NGINX. Some interface actions may depend on endpoints that need additional
+   implementation or verification; build and exercise each page before relying
+   on it operationally.
+
+5. Supporting services and gateway
+   Files: docker-compose.yml, nginx/
+
+   Docker Compose runs TimescaleDB/PostgreSQL, MongoDB, Redis, the API, GUI,
+   and NGINX. PostgreSQL owns core detection and response decisions. MongoDB
+   and Redis are supporting services in this architecture, not the authority
+   for packet classification or block decisions.
+
+   NGINX redirects HTTP port 8080 to HTTPS port 8443, serves as a reverse
+   proxy, and forwards API and WebSocket traffic. The local certificate is
+   self-signed, so clients need to trust the certificate or explicitly bypass
+   verification on an isolated lab network. Do not treat this local TLS setup
+   as production certificate management.
+
+6. Laptop B checker and simulations
+   Directory: laptop_b/
+
+   single_click_attack.sh / single_click_attack.bat and verify_target.py check
+   dashboard reachability, API dependency health, and a read-only
+   PostgreSQL-backed statistics request. They do not perform a vulnerability
+   scan or generate attack traffic.
+
+   The API's authenticated simulation scenarios are benign, SQL-injection
+   pattern, Log4Shell-pattern, port-sweep, SSH-attempt, and canary events.
+   They insert synthetic records directly into PostgreSQL; they do not send
+   exploit traffic to a remote service. They require a valid API username and
+   password. Do not remove authentication to make testing easier.
+
+7. Database integration test
+   File: testing/verify_database_engine.sql
+
+   This script runs assertions inside a transaction and ends with ROLLBACK.
+   It checks database-side session accounting, signature matching, correlation,
+   block/unblock and expiry bookkeeping, audit records, canary behavior,
+   nullable transport ports, and combined TCP flags. It is not a live network
+   packet-capture or OS-firewall test. Run only against the intended lab
+   database.
+
+
+What is distinctive about the design
+-------------------------------------
+Many IDS/IPS designs put packet parsing, detection, correlation, alerting, and
+response decisions in a long-running application or dedicated appliance. This
+project deliberately makes PostgreSQL a central part of that pipeline:
+
+  packet adapter -> ingress_packets -> SQL trigger/functions -> alerts,
+  sessions, reputation and block records -> PostgreSQL notification ->
+  privileged host adapter -> operating-system firewall
+
+This makes database state directly queryable and keeps packet-derived
+records, SQL detection decisions, and their audit history close together.
+Database transactions can make a packet insert and its trigger work atomic:
+if trigger processing fails, the insert is rolled back rather than appearing
+to have been fully processed.
+
+This is a design trade-off, not automatically an improvement over established
+IDS/IPS architectures. High packet rates can create database write pressure,
+trigger latency, table/index growth, lock contention, and a large blast radius
+if a database outage interrupts packet ingestion. A dedicated streaming
+pipeline or security appliance usually separates these concerns and has
+purpose-built capture, buffering, and failover.
+
+
+What kind of firewall / OSI layer is it?
+----------------------------------------
+There is no single universal "firewall tier" numbering system, so describe it
+by function and layer:
+
+  - Host firewall enforcement: the adapter asks Windows Firewall or Linux
+    iptables to block an IP. The current actions are host-level IP
+    source-address blocks; they are not a centrally managed network perimeter
+    firewall policy.
+  - Network/transport visibility: the adapter parses IPv4 and TCP/UDP header
+    information (roughly OSI Layers 3 and 4). The Linux capture path can see
+    link-layer frames, but the current parser focuses on IPv4.
+  - Limited application-content signatures: SQL DPI functions can inspect
+    payload text/bytes for configured patterns when the traffic is visible
+    and not encrypted (a limited Layer 7-style signature capability).
+  - Detection and response category: it combines IDS-style detection/alerting
+    with IPS-style attempted blocking through a host firewall integration.
+
+It is best described as a host-based, database-driven IDS/IPS prototype with
+some L3/L4 parsing, limited payload-signature detection, and host-firewall
+response. It is not a full next-generation firewall (NGFW): it does not
+provide a mature integrated firewall dataplane, deep protocol decoding,
+reliable TLS inspection, application/user identity policy, threat-research
+operations, high availability, or certified performance.
+
+
+How it differs from common alternatives
+---------------------------------------
+
+Traditional firewall:
+  Primarily enforces allow/deny rules at network and transport layers. This
+  project adds packet logging, SQL-side rules/signatures, alerts, and
+  correlation, but its actual enforcement is delegated to the host firewall.
+
+Network IDS:
+  Observes traffic and alerts without necessarily blocking. This project also
+  stores response decisions and can ask a privileged adapter to block an IP.
+
+Network IPS:
+  Usually sits inline or integrates closely with a network dataplane so it
+  can reliably stop traffic before it reaches a protected service. This
+  project is not an inline appliance: it captures host-visible packets and
+  applies host firewall rules after a database decision. Do not assume it
+  prevents every packet in an active connection.
+
+WAF:
+  A web application firewall understands and protects HTTP applications at
+  their entry point. This project is not a WAF and should not be placed in
+  front of a web application as a substitute.
+
+SIEM:
+  A SIEM aggregates and correlates logs/events from many products and hosts.
+  This project's PostgreSQL correlation is focused on its own packet and
+  application records; it is not a general enterprise SIEM.
+
+NGFW:
+  A commercial NGFW commonly combines stateful filtering, application
+  identification, threat prevention, policy administration, vendor
+  intelligence, and resilient network throughput in one supported platform.
+  This project does not meet that scope.
+
+
+Real-world suitability and important limitations
+-------------------------------------------------
+Use this as a controlled lab, demonstration, or prototype until it has had a
+formal security and reliability review. Important gaps and risks include:
+
+  - Windows raw socket capture is IPv4-only and can fail to observe Wi-Fi,
+    loopback, virtualized, or Docker-forwarded traffic consistently.
+  - Capture visibility is limited to packets available to the sensor. A
+    normal switched LAN or mobile hotspot does not mirror all client traffic.
+  - HTTPS/TLS payloads are encrypted. The current capture method cannot see
+    application contents inside TLS.
+  - Host firewall commands and direction matter. The current Windows rule is
+    inbound and blocks a remote source IP; it is not a complete network
+    segmentation or bidirectional policy system.
+  - Detection rules can false-positive. Automatically blocking an IP can
+    disconnect a user, an administrator, a gateway, or the sensor itself.
+    Test allowlists, expiry, unblocking, audit trails, and failure handling.
+  - PostgreSQL is on the packet-processing path. Measure throughput, latency,
+    queueing, database outage behavior, disk usage, retention, backups, and
+    recovery under representative loads.
+  - The API includes a simulation feature; keep it authenticated and ensure
+    the API is never exposed beyond the intended trusted network.
+  - The local dashboard certificate is self-signed. Production needs managed
+    certificates, secure private-key handling, and a deployment-specific
+    network/security configuration.
+  - Authentication and authorization require hardening and review before
+    production. In particular, review password hashing, JWT revocation,
+    roles/permissions, rate limiting, secret rotation, audit coverage, and
+    session handling.
+  - User-interface and API behavior need route-by-route tests. A service
+    health check alone does not validate all screens/actions.
+  - MongoDB/Redis health, credentials, backups, retention, and whether each
+    feature is genuinely wired must be verified for the target deployment.
+  - No system should automatically block production addresses until a
+    controlled change process, monitoring, rollback, and emergency access
+    have been tested.
+
+Before any real-world pilot, use isolated test networks and authorized traffic;
+complete a threat model and security review; add automated unit/integration
+tests; validate packet capture on each supported NIC/OS; test firewall
+rollback; measure capacity; configure monitoring, backups, access control,
+certificate management, retention, and incident response; then pilot in
+alert-only mode before enabling automatic blocks.
+
+
+Running and checking the lab
+----------------------------
+On the Windows sensor (Laptop A), after Docker Desktop is running, open an
+elevated PowerShell in the repository root:
+
+  Set-Location 'C:\path\to\db-ids-ips'
+  .\run_all.bat
+
+The launcher starts required containers, applies the PostgreSQL schema, and
+starts the privileged Windows packet/firewall adapter. Keep the adapter
+console open. Open the dashboard at:
+
+  https://localhost:8443
+
+On Laptop B, from its laptop_b directory, the read-only health check is:
+
+  ./single_click_attack.sh --target https://LAPTOP_A_IP:8443 --allow-self-signed
+
+Replace LAPTOP_A_IP with Laptop A's actual LAN IP. The self-signed bypass is
+only for an isolated, trusted lab network.
+
+To run database assertions on Laptop A from PowerShell:
+
+  Get-Content .\testing\verify_database_engine.sql -Raw |
+    docker compose exec -T postgres psql -U idsips -d idsips -v ON_ERROR_STOP=1 -f -
+
+The expected result is successful completion ending in ROLLBACK. This proves
+the test assertions passed against that database; it does not prove live
+capture or firewall enforcement.
+
+To check recent captured packets:
+
+  docker compose exec -T postgres psql -U idsips -d idsips -c "SELECT created_at, src_ip, dst_ip, protocol, src_port, dst_port, capture_source FROM ingress_packets ORDER BY id DESC LIMIT 20;"
+
+To stop containers while retaining database volumes:
+
+  docker compose down
+
+Do not use "docker compose down -v" unless permanently deleting the Compose
+database volumes is intended.
+
+
+Current practical classification
+--------------------------------
+The most accurate short description is:
+
+  "An educational, host-based IDS/IPS prototype that sends captured IPv4
+   packet data to PostgreSQL for trigger-driven detection and audit, then
+   delegates IP block actions to a privileged host firewall adapter."
+
+It is not currently appropriate to claim that it is production-ready, a
+network-wide sensor, an inline IPS, a full Layer 7 firewall, or an NGFW.

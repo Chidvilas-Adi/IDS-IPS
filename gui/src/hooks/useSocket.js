@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import useAuthStore from '../store/authStore';
 
-const SOCKET_URL = process.env.REACT_APP_WS_URL || 'http://localhost:8000';
+const SOCKET_URL = process.env.REACT_APP_WS_URL || window.location.origin;
 
 let globalSocket = null;
 let subscriberCount = 0;
@@ -67,8 +67,10 @@ const useSocket = () => {
     socket.on('disconnect', onDisconnect);
     socket.on('alert', onAlert);
     socket.on('alert:new', onAlert);
+    socket.on('new_alert', onAlert);
     socket.on('alert:bulk', onBulkAlerts);
     socket.on('stats:update', onStats);
+    socket.on('stats_update', onStats);
     socket.on('engine:status', onEngineStatus);
 
     if (socket.connected) {
@@ -80,8 +82,10 @@ const useSocket = () => {
       socket.off('disconnect', onDisconnect);
       socket.off('alert', onAlert);
       socket.off('alert:new', onAlert);
+      socket.off('new_alert', onAlert);
       socket.off('alert:bulk', onBulkAlerts);
       socket.off('stats:update', onStats);
+      socket.off('stats_update', onStats);
       socket.off('engine:status', onEngineStatus);
 
       subscriberCount--;

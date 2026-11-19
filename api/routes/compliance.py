@@ -15,15 +15,9 @@ def _db():
     from app import db
     return db
 
-def _clean(sql: str) -> str:
-    from app import app
-    if "sqlite" in app.config.get("SQLALCHEMY_DATABASE_URI", ""):
-        return sql.replace("::text", "").replace("NOW()", "CURRENT_TIMESTAMP")
-    return sql
-
 def _fetchall(sql: str, params: dict = None) -> list:
     with _db().engine.connect() as conn:
-        result = conn.execute(text(_clean(sql)), params or {})
+        result = conn.execute(text(sql), params or {})
         cols = list(result.keys())
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
@@ -151,7 +145,8 @@ def export_compliance_report():
 def list_audit_logs():
     limit = min(int(request.args.get("limit", 100)), 500)
     sql = """
-        SELECT id, actor, actor_type, action, table_name, record_id, ip_address::text, created_at
+        SELECT id, actor, actor_type, action, table_name, record_id, host(ip_address) AS ip_address,
+               COALESCE(new_values->>'reason', new_values->>'detail') AS details, created_at
         FROM audit_log ORDER BY created_at DESC LIMIT :limit
     """
     rows = _fetchall(sql, {"limit": limit})

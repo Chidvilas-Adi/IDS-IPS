@@ -67,8 +67,10 @@ def _generate_api_key() -> tuple[str, str]:
 def _audit(user_id: int, action: str, detail: str | None = None):
     try:
         _execute(
-            "INSERT INTO audit_log (user_id, action, detail, created_at) "
-            "VALUES (:uid, :action, :detail, NOW())",
+            "INSERT INTO audit_log "
+            "(tenant_id, actor, actor_type, action, table_name, record_id, new_values) "
+            "SELECT tenant_id, username, 'user', :action, 'users', id, "
+            "jsonb_build_object('detail', :detail) FROM users WHERE id = :uid",
             {"uid": user_id, "action": action, "detail": detail},
         )
     except Exception as exc:
@@ -90,7 +92,8 @@ def login():
         return jsonify({"error": "username and password are required"}), 400
 
     user = _query_one(
-        "SELECT id, username, password_hash, role, active FROM users WHERE username = :u",
+        "SELECT id, username, full_name, email, password_hash, role, enabled AS active "
+        "FROM users WHERE username = :u",
         {"u": username},
     )
 
@@ -98,7 +101,11 @@ def login():
         return jsonify({"error": "Invalid credentials"}), 401
 
     identity = str(user["id"])
-    additional = {"username": user["username"], "role": user["role"]}
+    additional = {
+        "username": user["username"],
+        "full_name": user["full_name"],
+        "role": user["role"],
+    }
     access_token = create_access_token(identity=identity, additional_claims=additional)
     refresh_token = create_refresh_token(identity=identity, additional_claims=additional)
 
@@ -112,6 +119,8 @@ def login():
             "user": {
                 "id": user["id"],
                 "username": user["username"],
+                "full_name": user["full_name"],
+                "email": user["email"],
                 "role": user["role"],
             },
         }
@@ -147,7 +156,7 @@ def logout():
 def me():
     identity = get_jwt_identity()
     user = _query_one(
-        "SELECT id, username, role, email, created_at FROM users WHERE id = :id",
+        "SELECT id, username, full_name, role, email, created_at FROM users WHERE id = :id",
         {"id": int(identity)},
     )
     if not user:

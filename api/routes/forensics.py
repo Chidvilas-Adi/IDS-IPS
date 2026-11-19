@@ -6,6 +6,7 @@ import logging
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
 from bson import ObjectId
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 forensics_bp = Blueprint("forensics", __name__, url_prefix="/api/forensics")
@@ -13,6 +14,10 @@ forensics_bp = Blueprint("forensics", __name__, url_prefix="/api/forensics")
 def _mongo():
     from app import mongo_db
     return mongo_db
+
+def _db():
+    from app import db
+    return db
 
 def _clean_doc(doc):
     if not doc:
@@ -25,21 +30,65 @@ def _clean_doc(doc):
     return doc
 
 @forensics_bp.route("/packets", methods=["GET"])
-@jwt_required(optional=True)
+@jwt_required()
 def list_raw_packets():
-    limit = min(int(request.args.get("limit", 50)), 200)
+    limit = max(1, min(int(request.args.get("limit", 100)), 200))
     src_ip = request.args.get("src_ip")
-    proto = request.args.get("protocol")
+    dst_ip = request.args.get("dst_ip")
+    proto = request.args.get("protocol", "").upper()
 
-    query = {}
+    conditions, params = [], {"limit": limit}
     if src_ip:
-        query["src_ip"] = src_ip
+        conditions.append("host(src_ip) = :src_ip")
+        params["src_ip"] = src_ip
+    if dst_ip:
+        conditions.append("host(dst_ip) = :dst_ip")
+        params["dst_ip"] = dst_ip
     if proto:
-        query["protocol"] = proto.upper()
+        conditions.append("UPPER(protocol) = :protocol")
+        params["protocol"] = proto
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    cursor = _mongo().raw_packets.find(query).sort("timestamp", -1).limit(limit)
-    packets = [_clean_doc(p) for p in cursor]
-    return jsonify({"packets": packets, "count": len(packets)})
+    with _db().engine.connect() as conn:
+        total = conn.execute(
+            text(f"SELECT COUNT(*) FROM ingress_packets {where}"),
+            {key: value for key, value in params.items() if key != "limit"},
+        ).scalar_one()
+        rows = conn.execute(
+            text(
+                "SELECT id, created_at, host(src_ip) AS src_ip, host(dst_ip) AS dst_ip, "
+                "src_port, dst_port, protocol, tcp_flags, packet_length, "
+                "capture_source, octet_length(payload_bytes) AS payload_size, "
+                "encode(substring(payload_bytes FROM 1 FOR 96), 'hex') AS payload_hex "
+                f"FROM ingress_packets {where} ORDER BY id DESC LIMIT :limit"
+            ),
+            params,
+        ).mappings().all()
+        protocol_rows = conn.execute(
+            text("SELECT protocol, COUNT(*) AS count FROM ingress_packets GROUP BY protocol")
+        ).mappings().all()
+        source_rows = conn.execute(
+            text("SELECT capture_source, COUNT(*) AS count FROM ingress_packets GROUP BY capture_source")
+        ).mappings().all()
+        last_captured_at = conn.execute(
+            text("SELECT MAX(created_at) FROM ingress_packets WHERE capture_source = 'capture'")
+        ).scalar_one()
+
+    packets = []
+    for row in rows:
+        packet = dict(row)
+        packet["timestamp"] = packet["created_at"].isoformat()
+        del packet["created_at"]
+        packets.append(packet)
+
+    return jsonify({
+        "packets": packets,
+        "count": len(packets),
+        "total": total,
+        "protocol_counts": {row["protocol"]: row["count"] for row in protocol_rows},
+        "source_counts": {row["capture_source"]: row["count"] for row in source_rows},
+        "last_captured_at": last_captured_at.isoformat() if last_captured_at else None,
+    })
 
 @forensics_bp.route("/packets/<packet_id>", methods=["GET"])
 @jwt_required(optional=True)

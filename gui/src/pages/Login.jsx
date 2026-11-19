@@ -30,10 +30,10 @@ const Login = () => {
       const res = await api.login(form.username, form.password);
       const { access_token, refresh_token, user } = res.data;
       login(access_token, refresh_token, user);
-      toast.success(`Welcome back, ${user?.username || form.username}!`);
+      toast.success(`Welcome back, ${user?.full_name || user?.username || form.username}!`);
       navigate('/', { replace: true });
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Invalid credentials. Please try again.';
+      const msg = err.response?.data?.error || err.response?.data?.detail || 'Invalid credentials. Please try again.';
       setError(msg);
     } finally {
       setLoading(false);
@@ -133,10 +133,9 @@ const Login = () => {
             </button>
           </form>
 
-          {/* Demo note */}
           <div className="mt-6 p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
             <p className="text-xs text-slate-500 text-center">
-              Default: <span className="font-mono text-slate-400">admin</span> / <span className="font-mono text-slate-400">admin123</span>
+              Use the administrator credentials configured for this installation.
             </p>
           </div>
         </div>

@@ -1,0 +1,179 @@
+DB-IDS/IPS - POSTGRESQL IP, ALERT, SESSION, AND RULE QUERIES
+===========================================================
+
+These queries are read-only unless explicitly described otherwise. Run them
+on Laptop A from the project/repository directory. They read PostgreSQL data;
+the database does not independently discover a device's real-world identity.
+
+
+1. OPEN PSQL INSIDE THE POSTGRES CONTAINER
+------------------------------------------
+
+    docker compose exec postgres psql -U idsips -d idsips
+
+At the idsips=# prompt, these psql commands are useful:
+
+    \conninfo
+    \dt
+    \d alerts
+    \d sessions
+    \d rules
+    \d ingress_packets
+
+Exit psql:
+
+    \q
+
+
+2. MOST RECENT OBSERVED PACKETS AND THEIR IP ADDRESSES
+------------------------------------------------------
+
+    SELECT id, created_at, src_ip::text AS src_ip, src_port,
+           dst_ip::text AS dst_ip, dst_port, protocol, capture_source
+    FROM ingress_packets
+    ORDER BY id DESC
+    LIMIT 50;
+
+`src_ip` is the packet sender as observed by the adapter; `dst_ip` is its
+destination. `capture_source` distinguishes captured and simulation input.
+Check the source IP against current laptop/router lease information before
+assigning a device name.
+
+
+3. PACKETS INVOLVING A PARTICULAR DEVICE
+----------------------------------------
+
+Replace 10.17.31.137 below with the device's CURRENT address:
+
+    SELECT created_at, src_ip::text AS src_ip, src_port,
+           dst_ip::text AS dst_ip, dst_port, protocol, capture_source
+    FROM ingress_packets
+    WHERE src_ip = '10.17.31.137'::inet
+       OR dst_ip = '10.17.31.137'::inet
+    ORDER BY created_at DESC
+    LIMIT 100;
+
+Only rows actually submitted to the database will appear. A zero-row result
+does not prove the device did not communicate; the selected interface or
+network path may not have been captured.
+
+
+4. SOURCE AND DESTINATION IP COUNTS
+-----------------------------------
+
+Top source IPs:
+
+    SELECT src_ip::text AS source_ip, COUNT(*) AS packet_count,
+           MAX(created_at) AS last_seen
+    FROM ingress_packets
+    GROUP BY src_ip
+    ORDER BY packet_count DESC
+    LIMIT 30;
+
+Top destination IPs:
+
+    SELECT dst_ip::text AS destination_ip, COUNT(*) AS packet_count,
+           MAX(created_at) AS last_seen
+    FROM ingress_packets
+    GROUP BY dst_ip
+    ORDER BY packet_count DESC
+    LIMIT 30;
+
+These counts include multicast, broadcast-like, synthetic, or repeated
+traffic if those packets were inserted. They are not a device inventory.
+
+
+5. CURRENT AND RECENT ALERTS
+----------------------------
+
+    SELECT id, created_at, severity, status, rule_type,
+           src_ip::text AS src_ip, dst_ip::text AS dst_ip,
+           src_port, dst_port, protocol
+    FROM alerts
+    ORDER BY created_at DESC
+    LIMIT 100;
+
+Filter by severity:
+
+    SELECT id, created_at, severity, status, rule_type,
+           src_ip::text AS src_ip, dst_ip::text AS dst_ip
+    FROM alerts
+    WHERE UPPER(severity) IN ('HIGH', 'CRITICAL')
+    ORDER BY created_at DESC
+    LIMIT 100;
+
+Filter alerts involving a device IP (replace the example address):
+
+    SELECT id, created_at, severity, status, rule_type,
+           src_ip::text AS src_ip, dst_ip::text AS dst_ip
+    FROM alerts
+    WHERE src_ip = '10.17.31.137'::inet
+       OR dst_ip = '10.17.31.137'::inet
+    ORDER BY created_at DESC
+    LIMIT 100;
+
+
+6. SESSIONS / NETWORK CONVERSATIONS
+-----------------------------------
+
+    SELECT id, src_ip::text AS src_ip, src_port,
+           dst_ip::text AS dst_ip, dst_port, protocol, state,
+           bytes_sent, bytes_recv, packets_sent, packets_recv,
+           started_at, last_seen_at
+    FROM sessions
+    ORDER BY last_seen_at DESC
+    LIMIT 100;
+
+Non-TCP/UDP protocols may have NULL ports; this is normal.
+
+
+7. ACTIVE BLOCKED IP RECORDS
+----------------------------
+
+    SELECT id, ip::text AS ip, reason, created_by,
+           created_at, expires_at, active, alert_id
+    FROM blocked_ips
+    WHERE active = true
+    ORDER BY created_at DESC;
+
+This lists database block records. Whether the host firewall actually applied
+a block also depends on the adapter's status/logs and firewall rules.
+Never add your own host/gateway IP to a block list during a live lab test.
+
+
+8. DETECTION RULES
+------------------
+
+Main packet rules:
+
+    SELECT id, name, rule_type, severity, action, protocol,
+           src_ip::text AS src_ip, dst_ip::text AS dst_ip,
+           src_port, dst_port, enabled, priority
+    FROM rules
+    ORDER BY priority, id;
+
+Correlation rules:
+
+    SELECT id, name, rule_type, severity, action,
+           threshold_count, window_seconds, enabled
+    FROM correlation_rules
+    ORDER BY id;
+
+DPI signatures:
+
+    SELECT id, name, protocol, pattern_type, severity, action, enabled, cve
+    FROM dpi_signatures
+    ORDER BY id;
+
+These commands only read rule definitions. Detection choices are processed by
+the database procedures/triggers. Use the authenticated dashboard/API to
+manage rules; do not update production rule rows casually with ad hoc SQL.
+
+
+9. SYNTHETIC SCENARIO ADDRESS REMINDER
+--------------------------------------
+
+Laptop B's demo uses documentation-only ranges such as 198.51.100.0/24 and
+192.0.2.0/24. Rows marked capture_source='simulation' are synthetic demo data,
+not traffic from a real remote device. The values 224.0.0.251:5353 are mDNS
+multicast and not a unique device or the hotspot gateway.

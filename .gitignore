@@ -134,6 +134,7 @@ temp/
 *.sql.gz
 *.dump
 *.backup
+*.db
 
 # ---- Pytest / Coverage ----
 .pytest_cache/

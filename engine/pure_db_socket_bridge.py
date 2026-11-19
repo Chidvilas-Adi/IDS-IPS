@@ -1,213 +1,348 @@
-"""
-pure_db_socket_bridge.py — Pure Socket-to-Database Gateway (Zero In-Memory Logic)
+"""Capture IP packets and submit them to PostgreSQL for SQL-side processing."""
 
-THIS SCRIPT PERFORMS ZERO ANALYSIS OR CALCULATION IN PYTHON.
-Every single operation:
-- Deep packet inspection regex matching
-- Threshold calculation & sliding windows (SSH brute force, port scan)
-- Stateful session tracking
-- Threat intelligence matching
-- Alert generation
-- Automated playbook execution & IP blocking
-
-IS PERFORMED 100% BY THE DATABASE (PostgreSQL PL/pgSQL or SQLite SQL Engine)!
-Includes auto-detection: if PostgreSQL is not running, seamlessly uses local SQLite database!
-"""
-
-import os
-import sys
+import ipaddress
 import json
 import logging
+import os
 import platform
+import select
+import socket
+import struct
 import subprocess
 import threading
-from datetime import datetime
+import time
+from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [PureDBSocketBridge] %(message)s")
-logger = logging.getLogger("PureDBSocketBridge")
+import psycopg2
+from dotenv import load_dotenv
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
+
+ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env", override=False)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [DBSocketBridge] %(levelname)s %(message)s")
+logger = logging.getLogger("DBSocketBridge")
 
 IS_WINDOWS = platform.system().lower() == "windows"
+NETWORK_INTERFACE = os.environ.get("NETWORK_INTERFACE", "eth0")
 
-# Database connection selector: PostgreSQL vs SQLite fallback
-USE_SQLITE = False
-sqlite_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ids_ips.db"))
 
-try:
-    import psycopg2
-    import psycopg2.extensions
-    import socket
-    PG_HOST = os.environ.get("POSTGRES_HOST", "localhost")
-    PG_PORT = int(os.environ.get("POSTGRES_PORT", 5432))
-    PG_DB = os.environ.get("POSTGRES_DB", "idsips")
-    PG_USER = os.environ.get("POSTGRES_USER", "idsips")
-    PG_PASS = os.environ.get("POSTGRES_PASSWORD", "idsips_secret")
+def get_db_conn():
+    return psycopg2.connect(
+        host=os.environ.get("POSTGRES_HOST", "localhost"),
+        port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        dbname=os.environ.get("POSTGRES_DB", "idsips"),
+        user=os.environ.get("POSTGRES_USER", "idsips"),
+        password=os.environ.get("POSTGRES_PASSWORD", "idsips_secret"),
+        connect_timeout=5,
+    )
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    s.connect((PG_HOST, PG_PORT))
-    s.close()
 
-    def get_db_conn():
-        return psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS)
-    logger.info("Connected to PostgreSQL master database.")
-except Exception:
-    import sqlite3
-    USE_SQLITE = True
-    logger.warning(f"PostgreSQL not available. Using local self-contained database: {sqlite_path}")
+def process_packet_in_db(conn, packet):
+    src_ip, dst_ip, src_port, dst_port, protocol, tcp_flags, payload, payload_bytes, packet_length = packet
+    payload_text = payload.replace("\x00", "")
+    for attempt in range(3):
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO ingress_packets
+                        (src_ip, dst_ip, src_port, dst_port, protocol,
+                         tcp_flags, packet_length, payload_text, payload_bytes, capture_source)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'capture')
+                    """,
+                    (
+                        src_ip, dst_ip, src_port, dst_port, protocol,
+                        tcp_flags, packet_length, payload_text, payload_bytes,
+                    ),
+                )
+            conn.commit()
+            return True
+        except psycopg2.Error as exc:
+            conn.rollback()
+            if exc.pgcode == "40P01":
+                if attempt < 2:
+                    logger.warning(
+                        "Packet transaction deadlocked; retrying (%s/3)",
+                        attempt + 1,
+                    )
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                logger.error(
+                    "Dropping captured packet after repeated database deadlocks "
+                    "(SQLSTATE %s)",
+                    exc.pgcode,
+                )
+                return False
+            logger.exception("PostgreSQL rejected a captured packet")
+            raise
+    return False
 
-    def get_db_conn():
-        conn = sqlite3.connect(sqlite_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
 
-# MongoDB optional connection
-try:
-    from pymongo import MongoClient
-    mongo_client = MongoClient(os.environ.get("MONGO_URI", "mongodb://localhost:27017"), serverSelectionTimeoutMS=1000)
-    mongo_client.server_info()
-    mongo_db = mongo_client["idsips"]
-except Exception:
-    mongo_db = None
+def _run_firewall_command(command):
+    result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "firewall command failed")
 
-# -----------------------------------------------------------------------------
-# OS Firewall Executor
-# -----------------------------------------------------------------------------
-def execute_firewall_block(ip: str, reason: str = "Database Threat Rule"):
-    logger.warning(f"EXECUTING FIREWALL BLOCK ON ATTACKER IP: {ip} (Reason: {reason})")
+
+def execute_firewall_action(action, local_ip=None):
+    operation = str(action.get("action", "")).upper()
+    if operation not in {"BLOCK", "UNBLOCK"}:
+        if operation == "ALERT":
+            logger.warning("Database alert: %s", action.get("reason", "unspecified"))
+        else:
+            logger.warning("Ignoring unsupported database firewall action: %s", operation)
+        return
+
+    try:
+        address = ipaddress.ip_interface(str(action["ip"]))
+    except (KeyError, ValueError) as exc:
+        logger.error("Ignoring database firewall action with invalid IP: %s", exc)
+        return
+
+    if address.network.prefixlen != address.max_prefixlen:
+        logger.error(
+            "Ignoring firewall action for non-host network: %s",
+            address.with_prefixlen,
+        )
+        return
+    ip = address.ip
+
+    if operation == "BLOCK" and local_ip and ip == ipaddress.ip_address(local_ip):
+        logger.error("Ignoring firewall block for the adapter's own host address: %s", ip)
+        return
+
     try:
         if IS_WINDOWS:
-            rule_name = f"DBIDS_{ip.replace(':', '_')}"
-            cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=block remoteip={ip}'
-            subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            rule_name = f"DBIDS_{str(ip).replace(':', '_')}"
+            if operation == "BLOCK":
+                subprocess.run(
+                    ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                _run_firewall_command(
+                    [
+                        "netsh", "advfirewall", "firewall", "add", "rule",
+                        f"name={rule_name}", "dir=in", "action=block",
+                        f"remoteip={ip}", "profile=any",
+                    ]
+                )
+            else:
+                result = subprocess.run(
+                    ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                if result.returncode:
+                    logger.info("No active firewall rule found for %s", ip)
         else:
-            subprocess.run(["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        logger.error(f"Firewall execution error: {e}")
+            binary = "ip6tables" if ip.version == 6 else "iptables"
+            rule = [binary, "-s", str(ip), "-j", "DROP"]
+            if operation == "BLOCK":
+                exists = subprocess.run(
+                    [binary, "-C", "INPUT", *rule[1:]],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                if exists.returncode:
+                    _run_firewall_command([binary, "-I", "INPUT", *rule[1:]])
+            else:
+                result = subprocess.run(
+                    [binary, "-D", "INPUT", *rule[1:]],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                if result.returncode:
+                    logger.info("No active firewall rule found for %s", ip)
+                    return
 
-# -----------------------------------------------------------------------------
-# In-Database SQL Processing for SQLite fallback
-# (When PostgreSQL is running, PL/pgSQL triggers handle this automatically)
-# -----------------------------------------------------------------------------
-def process_packet_in_sqlite(conn, src_ip, dst_ip, src_port, dst_port, protocol, payload_text, pkt_len):
-    cursor = conn.cursor()
-    # 1. Update session in SQL
-    cursor.execute("""
-        INSERT INTO sessions (tenant_id, src_ip, dst_ip, src_port, dst_port, protocol, bytes_sent, packets_sent)
-        VALUES (1, ?, ?, ?, ?, ?, ?, 1)
-    """, (src_ip, dst_ip, src_port, dst_port, protocol, pkt_len))
+        logger.info("%s firewall rule for %s", operation, ip)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        logger.exception("Failed to apply %s firewall action for %s", operation, ip)
 
-    # 2. DPI Regex Matching in SQL
-    cursor.execute("SELECT id, name, pattern, severity, action, cve FROM dpi_signatures WHERE enabled = 1")
-    import re
-    for sig in cursor.fetchall():
-        if payload_text and re.search(sig["pattern"], payload_text, re.IGNORECASE):
-            logger.warning(f"🚨 IN-DATABASE DPI MATCH: {sig['name']} from {src_ip}")
-            cursor.execute("""
-                INSERT INTO alerts (tenant_id, rule_id, rule_type, severity, src_ip, dst_ip, src_port, dst_port, protocol, packet_summary, status)
-                VALUES (1, ?, 'DPI_SIGNATURE', ?, ?, ?, ?, ?, ?, ?, 'open')
-            """, (sig["id"], sig["severity"], src_ip, dst_ip, src_port, dst_port, protocol, json.dumps({"signature": sig["name"], "cve": sig["cve"]})))
-            
-            if sig["action"] == "BLOCK":
-                cursor.execute("""
-                    INSERT INTO blocked_ips (tenant_id, ip, reason, expires_at, created_by, active)
-                    VALUES (1, ?, ?, datetime('now', '+60 minutes'), 'SQLite_Trigger', 1)
-                """, (src_ip, f"DPI Match: {sig['name']}"))
-                execute_firewall_block(src_ip, sig["name"])
-            break
 
-    # 3. Correlation: Port Sweep Scan in SQL
-    cursor.execute("""
-        SELECT COUNT(DISTINCT dst_port) as port_cnt 
-        FROM sessions 
-        WHERE src_ip = ? AND last_seen_at >= datetime('now', '-10 seconds')
-    """, (src_ip,))
-    row = cursor.fetchone()
-    if row and row["port_cnt"] >= 15:
-        logger.warning(f"🚨 IN-DATABASE CORRELATION MATCH: Horizontal Port Sweep from {src_ip}")
-        cursor.execute("""
-            INSERT INTO alerts (tenant_id, rule_type, severity, src_ip, dst_ip, dst_port, protocol, packet_summary, status)
-            VALUES (1, 'PORT_SWEEP_SCAN', 'HIGH', ?, ?, ?, 'TCP', '{"unique_ports": 15}', 'open')
-        """, (src_ip, dst_ip, dst_port))
-        cursor.execute("""
-            INSERT INTO blocked_ips (tenant_id, ip, reason, active)
-            VALUES (1, ?, 'Port Sweep Scan Detected', 1)
-        """, (src_ip,))
-        execute_firewall_block(src_ip, "Horizontal Port Sweep")
+def purge_expired_blocks():
+    with get_db_conn() as conn, conn.cursor() as cursor:
+        cursor.execute("CALL sp_purge_expired_records()")
 
-    conn.commit()
 
-# -----------------------------------------------------------------------------
-# Main Sniffer Pipeline
-# -----------------------------------------------------------------------------
+def listen_for_firewall_actions(local_ip):
+    while True:
+        conn = None
+        try:
+            conn = get_db_conn()
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            with conn.cursor() as cursor:
+                cursor.execute("LISTEN db_firewall_action")
+            logger.info("Listening for PostgreSQL firewall actions")
+            next_purge = 0
+
+            while True:
+                select.select([conn], [], [], 1)
+                conn.poll()
+                while conn.notifies:
+                    notification = conn.notifies.pop(0)
+                    try:
+                        execute_firewall_action(json.loads(notification.payload), local_ip)
+                    except json.JSONDecodeError:
+                        logger.error("Ignoring malformed database firewall notification")
+                if time.monotonic() >= next_purge:
+                    try:
+                        purge_expired_blocks()
+                    except psycopg2.Error:
+                        logger.exception("PostgreSQL expired-block cleanup failed")
+                    next_purge = time.monotonic() + 15
+        except (OSError, psycopg2.Error):
+            logger.exception("Database notification listener disconnected; retrying")
+            time.sleep(3)
+        finally:
+            if conn is not None:
+                conn.close()
+
+
+def parse_raw_ip_packet(data):
+    if len(data) < 20:
+        return None
+
+    version_ihl = data[0]
+    if version_ihl >> 4 != 4:
+        return None
+    ip_header_length = (version_ihl & 0x0F) * 4
+    if ip_header_length < 20 or len(data) < ip_header_length:
+        return None
+
+    protocol_number = data[9]
+    src_ip = socket.inet_ntoa(data[12:16])
+    dst_ip = socket.inet_ntoa(data[16:20])
+    src_port = dst_port = None
+    protocol = "OTHER"
+    tcp_flags = ""
+    payload_offset = ip_header_length
+
+    if protocol_number == socket.IPPROTO_TCP:
+        if len(data) < ip_header_length + 20:
+            return None
+        src_port, dst_port = struct.unpack("!HH", data[ip_header_length : ip_header_length + 4])
+        tcp_offset = (data[ip_header_length + 12] >> 4) * 4
+        if tcp_offset < 20 or len(data) < ip_header_length + tcp_offset:
+            return None
+        flags = data[ip_header_length + 13]
+        tcp_flags = ",".join(
+            name for bit, name in (
+                (0x01, "FIN"), (0x02, "SYN"), (0x04, "RST"),
+                (0x08, "PSH"), (0x10, "ACK"), (0x20, "URG"),
+            ) if flags & bit
+        )
+        protocol = "TCP"
+        payload_offset += tcp_offset
+    elif protocol_number == socket.IPPROTO_UDP:
+        if len(data) < ip_header_length + 8:
+            return None
+        src_port, dst_port = struct.unpack("!HH", data[ip_header_length : ip_header_length + 4])
+        protocol = "UDP"
+        payload_offset += 8
+    elif protocol_number == socket.IPPROTO_ICMP:
+        protocol = "ICMP"
+
+    payload_bytes = data[payload_offset:]
+    payload = payload_bytes.decode("utf-8", errors="ignore")
+    return src_ip, dst_ip, src_port, dst_port, protocol, tcp_flags, payload, payload_bytes, len(data)
+
+
+def _parse_ethernet_frame(data):
+    if len(data) < 14:
+        return None
+    ether_type = struct.unpack("!H", data[12:14])[0]
+    offset = 14
+    if ether_type in (0x8100, 0x88A8):
+        if len(data) < 18:
+            return None
+        ether_type = struct.unpack("!H", data[16:18])[0]
+        offset = 18
+    if ether_type != 0x0800:
+        return None
+    return parse_raw_ip_packet(data[offset:])
+
+
 class PureDBSocketBridge:
     def __init__(self):
-        self.conn = get_db_conn()
+        self.stop_event = threading.Event()
 
-    def handle_raw_data(self, src_ip, dst_ip, src_port, dst_port, protocol, payload_text, pkt_len):
+    @staticmethod
+    def get_host_ip():
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            return probe.getsockname()[0]
+
+    def _start_udp_listener(self, local_ip):
         try:
-            if USE_SQLITE:
-                process_packet_in_sqlite(self.conn, src_ip, dst_ip, src_port, dst_port, protocol, payload_text, pkt_len)
-            else:
-                cursor = self.conn.cursor()
-                cursor.execute("""
-                    INSERT INTO ingress_packets 
-                        (src_ip, dst_ip, src_port, dst_port, protocol, packet_length, payload_text)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (src_ip, dst_ip, src_port, dst_port, protocol, pkt_len, payload_text))
-                self.conn.commit()
-        except Exception as e:
-            logger.error(f"Database insertion error: {e}")
-
-        # Async MongoDB copy
-        if mongo_db:
-            try:
-                mongo_db.raw_packets.insert_one({
-                    "timestamp": datetime.utcnow(),
-                    "src_ip": src_ip, "dst_ip": dst_ip,
-                    "src_port": src_port, "dst_port": dst_port,
-                    "protocol": protocol, "length": pkt_len
-                })
-            except Exception:
-                pass
+            with get_db_conn() as conn, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.bind(("0.0.0.0", 9999))
+                logger.info("Test packet input listening on UDP port 9999")
+                while not self.stop_event.is_set():
+                    data, address = sock.recvfrom(65535)
+                    packet = (
+                        address[0], local_ip, address[1], 9999, "UDP", "",
+                        data.decode("utf-8", errors="ignore"), data, len(data),
+                    )
+                    process_packet_in_db(conn, packet)
+        except OSError as exc:
+            logger.warning(
+                "Optional UDP test listener on port 9999 is unavailable; "
+                "raw packet capture and firewall monitoring will continue: %s",
+                exc,
+            )
+        except psycopg2.Error:
+            logger.exception(
+                "Optional UDP test listener could not connect to PostgreSQL; "
+                "raw packet capture and firewall monitoring will continue"
+            )
 
     def start(self):
-        logger.info("=========================================================")
-        logger.info("   100% IN-DATABASE SOCKET BRIDGE RUNNING               ")
-        logger.info("   ALL RULES & ACTIONS COMPUTED IN SQL DATABASE          ")
-        logger.info("=========================================================")
+        local_ip = self.get_host_ip()
+        conn = get_db_conn()
+        conn.close()
+        threading.Thread(
+            target=listen_for_firewall_actions,
+            args=(local_ip,),
+            daemon=True,
+        ).start()
+        threading.Thread(target=self._start_udp_listener, args=(local_ip,), daemon=True).start()
+        logger.info("Capture host address: %s", local_ip)
 
-        # Try Scapy first; fallback to native socket listener
-        try:
-            from scapy.all import sniff, IP, IPv6, TCP, UDP, Raw
-            logger.info("Using Scapy packet capture driver...")
-            def pkt_callback(pkt):
-                if IP in pkt or IPv6 in pkt:
-                    ip_layer = pkt[IP] if IP in pkt else pkt[IPv6]
-                    src_ip = ip_layer.src
-                    dst_ip = ip_layer.dst
-                    src_port, dst_port = None, None
-                    protocol = "OTHER"
-                    if TCP in pkt:
-                        protocol = "TCP"
-                        src_port = pkt[TCP].sport
-                        dst_port = pkt[TCP].dport
-                    elif UDP in pkt:
-                        protocol = "UDP"
-                        src_port = pkt[UDP].sport
-                        dst_port = pkt[UDP].dport
-                    payload = pkt[Raw].load.decode("utf-8", errors="ignore") if Raw in pkt else ""
-                    self.handle_raw_data(src_ip, dst_ip, src_port, dst_port, protocol, payload, len(pkt))
-            sniff(prn=pkt_callback, store=False)
-        except Exception as e:
-            logger.warning(f"Scapy capture driver unavailable ({e}). Using native socket listening driver...")
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.bind(("0.0.0.0", 9999))
-            logger.info("Native socket bridge listening on UDP port 9999...")
+        if IS_WINDOWS:
+            capture_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+            capture_socket.bind((local_ip, 0))
+            capture_socket.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
+            logger.info("Windows raw packet capture enabled on %s", local_ip)
+            parse_frame = parse_raw_ip_packet
+        else:
+            capture_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+            capture_socket.bind((NETWORK_INTERFACE, 0))
+            logger.info("Linux packet capture enabled on %s", NETWORK_INTERFACE)
+            parse_frame = _parse_ethernet_frame
+
+        with capture_socket, get_db_conn() as conn:
             while True:
-                data, addr = sock.recvfrom(65535)
-                self.handle_raw_data(addr[0], "127.0.0.1", addr[1], 9999, "UDP", data.decode("utf-8", errors="ignore"), len(data))
+                data, _ = capture_socket.recvfrom(65535)
+                packet = parse_frame(data)
+                if packet is not None:
+                    process_packet_in_db(conn, packet)
+
 
 if __name__ == "__main__":
-    bridge = PureDBSocketBridge()
-    bridge.start()
+    try:
+        PureDBSocketBridge().start()
+    except (OSError, psycopg2.Error) as exc:
+        logger.exception("Packet bridge could not start: %s", exc)
+        raise SystemExit(1) from exc

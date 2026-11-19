@@ -13,7 +13,7 @@ export default function NoSQLExplorer() {
 
   const fetchCollections = async () => {
     try {
-      const res = await client.get('/nosql/collections');
+      const res = await client.get('/api/nosql/collections');
       setCollections(res.data.collections || []);
       if (res.data.collections?.length > 0) {
         loadDocs(res.data.collections[0].name);
@@ -27,13 +27,13 @@ export default function NoSQLExplorer() {
     setSelectedCol(colName);
     try {
       if (colName === 'raw_packets') {
-        const res = await client.get('/nosql/raw-packets');
+        const res = await client.get('/api/nosql/raw-packets');
         setDocs(res.data.documents || []);
       } else if (colName === 'canary_access_log') {
-        const res = await client.get('/nosql/canary-log');
+        const res = await client.get('/api/nosql/canary-log');
         setDocs(res.data.canary_logs || []);
       } else {
-        const res = await client.get('/nosql/threat-intel');
+        const res = await client.get('/api/nosql/threat-intel');
         setDocs(res.data.threat_intel || []);
       }
     } catch (e) {

@@ -1,12 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
+  BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Area, AreaChart
 } from 'recharts';
 import {
-  AlertTriangle, Ban, Activity, TrendingUp, TrendingDown,
-  Minus, Shield, Cpu, Database, Globe, Zap, RefreshCw,
+  AlertTriangle, Ban, Activity, Minus, Shield, Database, Zap, RefreshCw,
   Server, ArrowUp, ArrowDown
 } from 'lucide-react';
 import { format, subHours } from 'date-fns';
@@ -37,12 +36,14 @@ const StatCard = ({ title, value, subtext, icon: Icon, iconClass, trend, trendLa
       <div className={`p-2.5 rounded-lg ${iconClass || 'bg-slate-700'}`}>
         {Icon && <Icon className="w-5 h-5 text-white" />}
       </div>
-      <div className="flex items-center gap-1 text-xs text-slate-500">
-        <TrendIcon trend={trend} />
-        <span className={trend > 0 ? 'text-red-400' : trend < 0 ? 'text-green-400' : 'text-slate-500'}>
-          {trendLabel}
-        </span>
-      </div>
+      {trend !== undefined && trend !== null && (
+        <div className="flex items-center gap-1 text-xs text-slate-500">
+          <TrendIcon trend={trend} />
+          <span className={trend > 0 ? 'text-red-400' : trend < 0 ? 'text-green-400' : 'text-slate-500'}>
+            {trendLabel}
+          </span>
+        </div>
+      )}
     </div>
     <div className="text-2xl font-bold text-slate-100">{loading ? '—' : fmt(value)}</div>
     <div className="text-sm text-slate-400 mt-0.5">{title}</div>
@@ -52,13 +53,12 @@ const StatCard = ({ title, value, subtext, icon: Icon, iconClass, trend, trendLa
 
 // ─── Engine Health ────────────────────────────────────────────────────────────
 const ENGINE_ICONS = {
-  packet_capture: Cpu, dpi_engine: Zap, correlation: Activity,
-  threat_intel: Globe, session_tracker: Database, firewall: Shield, api: Server,
+  postgres: Database, mongodb: Database, redis: Zap,
 };
 const EngineHealth = ({ engines = {}, loading }) => (
   <div className="ids-card p-5">
     <div className="section-header">
-      <span className="section-title">Engine Health</span>
+      <span className="section-title">Core Service Health</span>
       <RefreshCw className="w-4 h-4 text-slate-500" />
     </div>
     <div className="space-y-2.5">
@@ -67,7 +67,7 @@ const EngineHealth = ({ engines = {}, loading }) => (
           <div key={i} className="h-8 bg-slate-700/50 rounded-lg animate-pulse" />
         ))
       ) : (
-        Object.entries(engines).map(([name, status]) => {
+        Object.entries(engines).length > 0 ? Object.entries(engines).map(([name, status]) => {
           const Icon = ENGINE_ICONS[name] || Server;
           const dot = status === 'running' ? 'bg-green-500' : status === 'warning' ? 'bg-yellow-500' : 'bg-red-500';
           const label = name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -81,9 +81,14 @@ const EngineHealth = ({ engines = {}, loading }) => (
               </span>
             </div>
           );
-        })
+        }) : (
+          <p className="text-sm text-slate-500">Service health information is unavailable.</p>
+        )
       )}
     </div>
+    <p className="text-xs text-slate-500 mt-3">
+      Packet capture and host firewall adapters run separately and are not inferred from database health.
+    </p>
   </div>
 );
 
@@ -103,7 +108,7 @@ const AlertTicker = ({ alerts }) => {
             <div key={i} className="flex items-center gap-3 whitespace-nowrap">
               <SeverityBadge severity={a.severity} showDot size="xs" />
               <span className="text-xs text-slate-400 font-mono">{a.src_ip} → {a.dst_ip}:{a.dst_port}</span>
-              <span className="text-xs text-slate-300">{a.rule_name}</span>
+              <span className="text-xs text-slate-300">{a.rule_name || a.rule_type || 'Unclassified alert'}</span>
               <span className="text-slate-700">|</span>
             </div>
           ))}
@@ -167,11 +172,11 @@ const TopAttackers = ({ data = [], loading }) => (
                   <div className="flex items-center gap-2">
                     <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden max-w-[60px]">
                       <div
-                        className={`h-full rounded-full ${row.reputation_score >= 80 ? 'bg-red-500' : row.reputation_score >= 50 ? 'bg-orange-500' : 'bg-yellow-500'}`}
-                        style={{ width: `${row.reputation_score}%` }}
+                        className={`h-full rounded-full ${(Number(row.reputation_score) || 0) >= 80 ? 'bg-red-500' : (Number(row.reputation_score) || 0) >= 50 ? 'bg-orange-500' : 'bg-yellow-500'}`}
+                        style={{ width: `${Number(row.reputation_score) || 0}%` }}
                       />
                     </div>
-                    <span className="text-xs text-slate-400 font-mono">{row.reputation_score}</span>
+                    <span className="text-xs text-slate-400 font-mono">{Number(row.reputation_score) || 0}</span>
                   </div>
                 </td>
                 <td className="text-slate-400">{row.country || '—'}</td>
@@ -184,7 +189,7 @@ const TopAttackers = ({ data = [], loading }) => (
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 const Dashboard = () => {
-  const { alertQueue, stats: liveStats, engineStatus } = useSocket();
+  const { alertQueue, stats: liveStats } = useSocket();
 
   const { data: overview, isLoading: loadingOverview } = useQuery({
     queryKey: ['stats-overview'],
@@ -192,19 +197,19 @@ const Dashboard = () => {
     refetchInterval: 30000,
   });
 
-  const { data: hourlyData, isLoading: loadingHourly } = useQuery({
+  const { data: hourlyData } = useQuery({
     queryKey: ['alerts-by-hour'],
     queryFn: () => api.getAlertsByHour().then((r) => r.data),
     refetchInterval: 60000,
   });
 
-  const { data: severityData, isLoading: loadingSeverity } = useQuery({
+  const { data: severityData } = useQuery({
     queryKey: ['severity-distribution'],
     queryFn: () => api.getSeverityDistribution().then((r) => r.data),
     refetchInterval: 60000,
   });
 
-  const { data: protocolData, isLoading: loadingProtocol } = useQuery({
+  const { data: protocolData } = useQuery({
     queryKey: ['protocol-breakdown'],
     queryFn: () => api.getProtocolBreakdown().then((r) => r.data),
     refetchInterval: 60000,
@@ -223,23 +228,35 @@ const Dashboard = () => {
   });
 
   const stats = liveStats || overview || {};
-  const engines = Object.keys(engineStatus).length > 0 ? engineStatus : (engineData || {});
+  const engines = Object.fromEntries(
+    Object.entries(engineData?.components || {}).map(([name, status]) => [
+      name,
+      status === 'UP' ? 'running' : 'stopped',
+    ])
+  );
 
   // Generate hourly labels for last 24h if server returns empty
-  const hourly = hourlyData?.length
-    ? hourlyData
+  const hourlyRows = hourlyData?.timeseries || [];
+  const hourly = hourlyRows.length
+    ? hourlyRows.map((row) => ({
+        hour: String(row.time_slot).slice(11, 16),
+        count: row.count,
+        blocked: 0,
+      }))
     : [...Array(24)].map((_, i) => ({
         hour: format(subHours(new Date(), 23 - i), 'HH:00'),
         count: 0,
         blocked: 0,
       }));
 
-  const severityDist = severityData?.length
-    ? severityData
+  const severityRows = severityData?.severities || [];
+  const severityDist = severityRows.length
+    ? severityRows
     : Object.entries(SEVERITY_COLORS).map(([name]) => ({ name, value: 0 }));
 
-  const protocols = protocolData?.length
-    ? protocolData
+  const protocolRows = protocolData?.protocols || [];
+  const protocols = protocolRows.length
+    ? protocolRows.map((row) => ({ protocol: row.name, count: row.value }))
     : [{ protocol: 'TCP', count: 0 }, { protocol: 'UDP', count: 0 }];
 
   return (
@@ -262,7 +279,7 @@ const Dashboard = () => {
           value={stats.alerts_today ?? 0}
           icon={AlertTriangle}
           iconClass="bg-red-700"
-          trend={stats.alerts_trend ?? 0}
+          trend={stats.alerts_trend}
           trendLabel={`${Math.abs(stats.alerts_trend ?? 0)}% vs yesterday`}
           loading={loadingOverview}
         />
@@ -271,7 +288,7 @@ const Dashboard = () => {
           value={stats.blocked_ips ?? 0}
           icon={Ban}
           iconClass="bg-orange-700"
-          trend={stats.blocked_trend ?? 0}
+          trend={stats.blocked_trend}
           trendLabel={`${Math.abs(stats.blocked_trend ?? 0)}% vs yesterday`}
           loading={loadingOverview}
         />
@@ -280,7 +297,7 @@ const Dashboard = () => {
           value={stats.active_sessions ?? 0}
           icon={Activity}
           iconClass="bg-brand-700"
-          trend={stats.sessions_trend ?? 0}
+          trend={stats.sessions_trend}
           trendLabel="current"
           loading={loadingOverview}
         />
@@ -294,7 +311,7 @@ const Dashboard = () => {
             (stats.threat_score ?? 0) >= 50 ? 'bg-orange-700' :
             'bg-green-700'
           }
-          trend={stats.score_trend ?? 0}
+          trend={stats.score_trend}
           trendLabel="today"
           loading={loadingOverview}
         />
@@ -317,10 +334,6 @@ const Dashboard = () => {
                   <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} />
                   <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
                 </linearGradient>
-                <linearGradient id="blockGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#f97316" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
-                </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis dataKey="hour" tick={{ fill: '#64748b', fontSize: 11 }} />
@@ -328,7 +341,6 @@ const Dashboard = () => {
               <Tooltip content={<CustomTooltip />} />
               <Legend wrapperStyle={{ fontSize: 12, color: '#94a3b8' }} />
               <Area type="monotone" dataKey="count" name="Alerts" stroke="#ef4444" fill="url(#alertGrad)" strokeWidth={2} dot={false} />
-              <Area type="monotone" dataKey="blocked" name="Blocked" stroke="#f97316" fill="url(#blockGrad)" strokeWidth={2} dot={false} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
@@ -385,7 +397,7 @@ const Dashboard = () => {
 
         {/* Top attackers */}
         <div className="lg:col-span-2">
-          <TopAttackers data={topAttackers || []} loading={loadingAttackers} />
+          <TopAttackers data={topAttackers?.attackers || []} loading={loadingAttackers} />
         </div>
       </div>
 

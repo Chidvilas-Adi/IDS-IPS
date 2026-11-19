@@ -1,21 +1,45 @@
 #!/usr/bin/env bash
-# =============================================================================
-# run_all.sh — Dedicated Console Launcher on Port 1234
-# =============================================================================
+set -euo pipefail
 
-export PORT=1234
-echo "================================================================="
-echo "   DB-IDS/IPS ULTRA — DEDICATED CONSOLE ON PORT 1234             "
-echo "================================================================="
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
 
-(cd api && python3 app.py) &
-API_PID=$!
+if [[ ! -f .env ]]; then
+    echo "[!] .env is missing. Copy .env.example to .env and configure it first." >&2
+    exit 1
+fi
 
-(cd engine && python3 pure_db_socket_bridge.py) &
-ENGINE_PID=$!
+if [[ "$EUID" -ne 0 ]]; then
+    echo "[!] Run with sudo for packet capture and firewall actions." >&2
+    exit 1
+fi
 
-echo "[+] Dedicated Console Live at: http://localhost:1234"
-echo "API PID: $API_PID | Engine PID: $ENGINE_PID"
+export POSTGRES_HOST=localhost
+export DATABASE_URL=
+export MONGO_HOST=localhost
+export REDIS_HOST=localhost
+export API_PORT=1234
 
-trap "kill $API_PID $ENGINE_PID 2>/dev/null; exit" SIGINT SIGTERM
+echo "[*] Starting PostgreSQL, MongoDB, and Redis..."
+docker compose up -d --wait postgres mongodb redis
+echo "[*] Applying the PostgreSQL schema and migrations..."
+docker compose run --rm schema
+docker compose up -d --no-deps --wait api
+docker compose up -d --build --wait gui nginx
+
+if [[ ! -x "$ROOT/engine/.venv/bin/python" ]]; then
+    python3 -m venv "$ROOT/engine/.venv"
+fi
+"$ROOT/engine/.venv/bin/python" -m pip install -r "$ROOT/engine/requirements-bridge.txt"
+
+(cd "$ROOT/engine" && .venv/bin/python -u pure_db_socket_bridge.py) &
+BRIDGE_PID=$!
+
+cleanup() {
+    kill "$BRIDGE_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+echo "[+] Dashboard: https://localhost:8443"
+echo "[+] PostgreSQL owns packet detection and correlation."
 wait

@@ -207,33 +207,39 @@ def test_rule(rule_id: int):
 @jwt_required()
 def list_correlation_rules():
     rows = _fetchall(
-        "SELECT id, name, description, logic, threshold, time_window_seconds, "
-        "severity, enabled, created_at FROM correlation_rules ORDER BY id DESC"
+        "SELECT id, name, description, rule_type, event_filter, threshold_count, "
+        "window_seconds, action, severity, enabled, created_at "
+        "FROM correlation_rules ORDER BY id DESC"
     )
-    return jsonify([_serialize(r) for r in rows])
+    return jsonify({"rules": [_serialize(r) for r in rows]})
 
 
 @rules_bp.post("/correlation")
 @jwt_required()
 def create_correlation_rule():
     data = request.get_json(silent=True) or {}
-    required = ["name", "severity"]
+    required = ["name", "rule_type", "severity"]
     missing = [f for f in required if not data.get(f)]
     if missing:
         return jsonify({"error": f"Missing fields: {missing}"}), 400
 
     import json as _json
-    logic_json = _json.dumps(data.get("logic", {})) if isinstance(data.get("logic"), dict) else data.get("logic", "{}")
+    event_filter = data.get("event_filter", {})
+    event_filter_json = _json.dumps(event_filter) if isinstance(event_filter, dict) else event_filter
 
     row = _fetchone(
-        "INSERT INTO correlation_rules (name, description, logic, threshold, time_window_seconds, "
-        "severity, enabled, created_at) "
-        "VALUES (:name, :desc, :logic::jsonb, :threshold, :window, :severity, :enabled, NOW()) "
+        "INSERT INTO correlation_rules (name, description, rule_type, event_filter, threshold_count, "
+        "window_seconds, action, severity, enabled, created_at) "
+        "VALUES (:name, :desc, :rule_type, CAST(:event_filter AS jsonb), :threshold_count, "
+        ":window_seconds, :action, :severity, :enabled, NOW()) "
         "RETURNING id, created_at",
         {
             "name": data["name"], "desc": data.get("description"),
-            "logic": logic_json, "threshold": data.get("threshold", 5),
-            "window": data.get("time_window_seconds", 60),
+            "rule_type": data["rule_type"],
+            "event_filter": event_filter_json,
+            "threshold_count": data.get("threshold_count", 1),
+            "window_seconds": data.get("window_seconds", 60),
+            "action": data.get("action", "ALERT"),
             "severity": data["severity"], "enabled": data.get("enabled", True),
         },
     )
@@ -247,17 +253,21 @@ def update_correlation_rule(rule_id: int):
     import json as _json
     sets, params = [], {"id": rule_id}
     mapping = {
-        "name": "name", "description": "description",
-        "threshold": "threshold", "time_window_seconds": "time_window_seconds",
-        "severity": "severity", "enabled": "enabled",
+        "name": "name", "description": "description", "rule_type": "rule_type",
+        "threshold_count": "threshold_count", "window_seconds": "window_seconds",
+        "action": "action", "severity": "severity", "enabled": "enabled",
     }
     for k, col in mapping.items():
         if k in data:
             sets.append(f"{col} = :{k}")
             params[k] = data[k]
-    if "logic" in data:
-        sets.append("logic = :logic::jsonb")
-        params["logic"] = _json.dumps(data["logic"]) if isinstance(data["logic"], dict) else data["logic"]
+    if "event_filter" in data:
+        sets.append("event_filter = CAST(:event_filter AS jsonb)")
+        params["event_filter"] = (
+            _json.dumps(data["event_filter"])
+            if isinstance(data["event_filter"], dict)
+            else data["event_filter"]
+        )
     if not sets:
         return jsonify({"error": "No fields to update"}), 400
     result = _execute(f"UPDATE correlation_rules SET {', '.join(sets)} WHERE id = :id", params)
@@ -275,10 +285,10 @@ def update_correlation_rule(rule_id: int):
 @jwt_required()
 def list_signatures():
     rows = _fetchall(
-        "SELECT id, name, pattern, pattern_type, protocol, severity, enabled, created_at "
+        "SELECT id, name, pattern, pattern_type, protocol, severity, action, enabled, created_at "
         "FROM dpi_signatures ORDER BY id DESC LIMIT 500"
     )
-    return jsonify([_serialize(r) for r in rows])
+    return jsonify({"signatures": [_serialize(r) for r in rows]})
 
 
 @rules_bp.post("/signatures")
@@ -375,7 +385,8 @@ def _parse_snort_line(line: str) -> dict | None:
 @rules_bp.post("/import/snort")
 @jwt_required()
 def import_snort():
-    text_data = request.data.decode("utf-8", errors="replace")
+    data = request.get_json(silent=True)
+    text_data = data.get("rules_text", "") if isinstance(data, dict) else request.data.decode("utf-8", errors="replace")
     lines = text_data.splitlines()
     imported, skipped = 0, 0
 
